@@ -206,7 +206,15 @@ global availability before AgentMail accepts creation.
 
 Browser refresh preserves non-secret draft fields and the setup request ID;
 API keys are never saved in browser storage. Retrying the same setup resumes any
-inbox already created before the failure.
+inbox already created before the failure. Drafts are scoped to the agent requested
+by the setup link. Once an inbox has been allocated, its agent and address stay
+fixed during recovery. A failed progress lookup can be retried in place.
+
+When the account and inbox share a setup request ID, completion replaces the
+account’s initial agent access with the final selected agent. Reusing an account
+from another setup preserves its existing installs. Both paths use the email
+setup permission (`tools:manage_connections`), without an additional agent-edit
+permission.
 
 ## Verification and live qualification
 

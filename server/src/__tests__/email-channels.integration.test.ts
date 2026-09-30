@@ -45,6 +45,7 @@ import {
   issues,
   authUsers,
   companyMemberships,
+  principalPermissionGrants,
   toolConnections,
   toolConnectionInstalls,
   connectionGrants,
@@ -61,6 +62,7 @@ import {
   agentmailMessageSchema,
   type AgentmailMessage,
 } from "../services/agentmail-api.js";
+import { accessService } from "../services/access.js";
 import { emailConnectionService } from "../services/email-connections.js";
 import { toolAccessService } from "../services/tool-access.js";
 import { emailSendSchema } from "@paperclipai/shared";
@@ -1060,6 +1062,50 @@ describe("AgentMail durable email pipeline", () => {
     await expect(
       svc.credential(f.companyId, connection.id, actor),
     ).rejects.toThrow(/revoked/);
+  });
+
+  it.each(["new", "reused"] as const)("finishes a %s account for the final agent with only connection-management permission", async kind => {
+    const f = await fixture("websocket");
+    const actor = { userId: "email-board" };
+    await f.service.control(f.endpointId, "remove", actor);
+    const selectedAgentId = randomUUID();
+    await db.insert(agents).values({ id: selectedAgentId, companyId: f.companyId, name: "Final email agent",
+      role: "engineer", status: "idle", adapterType: "process", permissions: {} });
+    await db.insert(principalPermissionGrants).values({ companyId: f.companyId, principalType: "user",
+      principalId: actor.userId, permissionKey: "tools:manage_connections" });
+    expect(await accessService(db).hasPermission(f.companyId, "user", actor.userId, "tools:manage_connections")).toBe(true);
+    expect(await accessService(db).hasPermission(f.companyId, "user", actor.userId, "agent_config:update")).toBe(false);
+    const requestId = randomUUID();
+    const svc = emailConnectionService(db, f.fetcher);
+    const connection = await svc.connect(f.companyId, { apiKey: "test-key", grantKind: "organization",
+      allAgents: false, agentIds: [f.agentId], idempotencyKey: kind === "new" ? requestId : randomUUID() }, actor);
+    const server = express();
+    server.use(express.json());
+    server.use((req, _res, next) => {
+      req.actor = { type: "board", source: "session", userId: actor.userId, companyIds: [f.companyId] };
+      next();
+    });
+    server.use("/api", emailRoutes(db, f.service));
+    server.use(errorHandler);
+    const input = { assignedAgentId: selectedAgentId, credentialConnectionId: connection.id,
+      inboxId: f.address, receiveMode: "websocket", idempotencyKey: requestId };
+    const route = `/api/companies/${f.companyId}/email/inboxes`;
+    // Keep one listener for this journey instead of racing ephemeral listeners
+    // against Node's HTTP keep-alive socket reuse between requests.
+    const http = server.listen(0, "127.0.0.1");
+    await new Promise<void>((resolve, reject) => { http.once("listening", resolve); http.once("error", reject); });
+    try {
+      const response = await request(http).post(route).send(input).expect(201);
+      expect(response.body).toMatchObject({ assignedAgentId: selectedAgentId, status: "active", address: f.address });
+      await request(http).post(route).send(input).expect(201);
+      const installs = await db.select().from(toolConnectionInstalls).where(eq(toolConnectionInstalls.connectionId, connection.id));
+      expect(installs.map(i => i.targetId).sort()).toEqual((kind === "new" ? [selectedAgentId] : [f.agentId, selectedAgentId]).sort());
+      await expect(svc.assertAgentAccess(f.companyId, connection.id, selectedAgentId)).resolves.toBeUndefined();
+      if (kind === "new") await expect(svc.assertAgentAccess(f.companyId, connection.id, f.agentId)).rejects.toThrow(/no longer has access/);
+      await request(http).post(`/api/companies/${randomUUID()}/email/inboxes`).send(input).expect(404);
+    } finally {
+      await new Promise<void>((resolve, reject) => http.close(error => error ? reject(error) : resolve()));
+    }
   });
 
   it.each(["create_inbox", "create_inbox_key", "address_taken"] as const)("reports a provider rejection during %s and resumes the same setup after correction", async (failedOperation) => {

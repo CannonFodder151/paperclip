@@ -797,6 +797,7 @@ export function emailChannelService(db: Db, options: EmailChannelOptions) {
           input.credentialConnectionId,
           agent.id,
           actor,
+          input.idempotencyKey,
         );
       } else if (controlKey) await vault(endpoint, "controlKey", controlKey);
       if (!controlKey) throw badRequest("AgentMail API key required");

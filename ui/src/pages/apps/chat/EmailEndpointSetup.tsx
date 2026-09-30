@@ -138,23 +138,16 @@ function EmailEndpointSetupForm({ companyId }: { companyId: string }) {
   }, [chosen, username]);
   const connect = useMutation({
     mutationFn: async () => {
-      let savedConnectionId = connectionId;
-      if (!savedConnectionId) {
+      if (!connectionId) {
         const result = await emailApi.connect(companyId, {
           apiKey: apiKey.trim(), grantKind: "organization", allAgents: false,
           agentIds: [agentId], idempotencyKey: requestId,
         });
-        savedConnectionId = result.id;
         setApiKey("");
         setConnectionId(result.id);
         void cache.invalidateQueries({ queryKey: queryKeys.tools.connections(companyId) });
       }
-      // Only this new-account flow owns its initial access defaults. Reused
-      // accounts keep their existing grants; setup adds the selected agent.
-      if (!params.get("connectionId")) {
-        await toolsApi.putConnectionInstalls(savedConnectionId, [{ targetType: "agent", targetId: agentId }]);
-        void cache.invalidateQueries({ queryKey: queryKeys.tools.connectionInstalls(savedConnectionId) });
-      }
+
     },
     onSuccess: () => setStep(1),
   });
@@ -194,7 +187,7 @@ function EmailEndpointSetupForm({ companyId }: { companyId: string }) {
   const assignedInbox = addressMode === "existing" && inboxes.data?.some(i => i.id !== requestId && i.address === address && i.status !== "archived");
   const addressError = addressTaken ? "This email address is already in use. Choose a different address."
     : assignedInbox ? "This inbox is already assigned to an agent." : null;
-  const error = connect.error ?? (!addressTaken ? setup.error : null) ?? inspected.error ?? agents.error ?? inboxes.error;
+  const error = connect.error ?? (!addressTaken ? setup.error : null) ?? inspected.error ?? agents.error;
   const busy = connect.isPending || setup.isPending;
   const identityReady = inboxes.isSuccess && (!pendingEndpoint || pendingEndpoint.assignedAgentId === agentId);
   const canContinue = identityReady && !!chosen && !busy && !(lowTrust && !scoped) && (!!connectionId || !!apiKey.trim());
@@ -207,6 +200,12 @@ function EmailEndpointSetupForm({ companyId }: { companyId: string }) {
     <header className="space-y-2">
       <h1 className="text-xl font-bold">{step === 2 ? "Your agent’s email is ready" : "Give an agent an email address"}</h1>
     </header>
+    {step < 2 && inboxes.isError && <div role="alert" className="space-y-2 text-sm">
+      <p className="text-destructive">Could not load email setup progress. {inboxes.error.message}</p>
+      <Button type="button" variant="outline" size="sm" disabled={busy || inboxes.isFetching} onClick={() => { void inboxes.refetch(); }}>
+        {inboxes.isFetching ? "Loading…" : "Retry loading inboxes"}
+      </Button>
+    </div>}
     {step < 2 && <ChatSetupNavigation labels={["Agent", "Email address"]} step={step}
       availableStep={step} disabled={busy} onSelect={index => { setup.reset(); setStep(index as 0 | 1); }} />}
     {step === 0 && <form className="space-y-6" onSubmit={event => { event.preventDefault(); if (canContinue) connect.mutate(); }}>

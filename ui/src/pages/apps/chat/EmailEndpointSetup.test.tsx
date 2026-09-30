@@ -156,7 +156,7 @@ describe("AgentMail two-step setup", () => {
     expect(mocks.inspect).not.toHaveBeenCalledWith("company", "ralph-account");
   });
 
-  it("replaces new-account access after changing agents, including after reload", async () => {
+  it("submits the final agent with the original setup request after changing agents and reloading", async () => {
     mocks.listAgents.mockResolvedValue([
       { id: "ralph", name: "Ralph", status: "idle", permissions: {} },
       { id: "support", name: "Support", status: "idle", permissions: {} },
@@ -174,16 +174,13 @@ describe("AgentMail two-step setup", () => {
     root = createRoot(container);
     await mount(false, false);
     await vi.waitFor(() => expect(button("Continue").disabled).toBe(false));
-    mocks.putInstalls.mockRejectedValueOnce(new Error("Could not update agent access"));
-    await click("Continue");
-    await vi.waitFor(() => expect(container.textContent).toContain("Could not update agent access"));
-    expect(container.querySelector("#email-name")).toBeNull();
     await click("Continue");
     await vi.waitFor(() => expect(container.querySelector<HTMLInputElement>("#email-name")?.value).toBe("support"));
-    expect(mocks.putInstalls).toHaveBeenLastCalledWith("account", [{ targetType: "agent", targetId: "support" }]);
+    // Access is updated by email setup, without a separate agent-config permission.
+    expect(mocks.putInstalls).not.toHaveBeenCalled();
     expect(mocks.connect).toHaveBeenCalledTimes(1);
     await click("Create email address");
-    await vi.waitFor(() => expect(mocks.setup).toHaveBeenCalledWith("company", expect.objectContaining({ assignedAgentId: "support" })));
+    await vi.waitFor(() => expect(mocks.setup).toHaveBeenCalledWith("company", expect.objectContaining({ assignedAgentId: "support", idempotencyKey: mocks.connect.mock.calls[0][1].idempotencyKey })));
   });
 
   it.each(["new", "existing"])("resumes its allocated %s inbox after a provider failure and reload", async addressMode => {
@@ -231,6 +228,21 @@ describe("AgentMail two-step setup", () => {
     const option = container.querySelector<HTMLOptionElement>('option[value="ralph@agentmail.to"]');
     expect(option?.disabled).toBe(true);
     expect(mocks.setup).not.toHaveBeenCalled();
+  });
+
+  it("retries loading setup progress without losing the entered key or reloading", async () => {
+    mocks.listInboxes.mockRejectedValueOnce(new Error("Service unavailable"));
+    await mount(false);
+    await fill('input[type="password"]', "private-test-key");
+    await vi.waitFor(() => expect(container.textContent).toContain("Could not load email setup progress"));
+    expect(button("Continue").disabled).toBe(true);
+    await click("Retry loading inboxes");
+    await vi.waitFor(() => expect(button("Continue").disabled).toBe(false));
+    expect(container.querySelector<HTMLInputElement>('input[type="password"]')?.value).toBe("private-test-key");
+    await click("Continue");
+    await vi.waitFor(() => expect(container.querySelector("#email-name")).not.toBeNull());
+    expect(mocks.listInboxes).toHaveBeenCalledTimes(2);
+    expect(mocks.putInstalls).not.toHaveBeenCalled();
   });
 
   it("preserves the existing low-trust work-boundary gate", async () => {

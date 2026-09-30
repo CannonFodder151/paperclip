@@ -262,6 +262,7 @@ export function emailConnectionService(
     id: string,
     agentId: string,
     actor: EmailActor,
+    setupRequestId: string,
   ) {
     return db.transaction(async (tx) => {
       const db = tx as unknown as Db;
@@ -275,26 +276,30 @@ export function emailConnectionService(
           ),
         )
         .for("update");
-      await emailConnectionService(db, fetchImpl).get(companyId, id, actor);
+      const connection = await emailConnectionService(db, fetchImpl).get(companyId, id, actor);
+      // A key saved by this same setup request belongs only to its final agent.
+      // Reused accounts keep their existing installs. Do this inside email
+      // setup's existing authorization boundary, not the agent-config API.
+      const replaceInitialAccess = connection.uid === `agentmail-account-${setupRequestId}`;
       const tools = toolAccessService(db);
       const installs = await db
         .select()
         .from(toolConnectionInstalls)
         .where(eq(toolConnectionInstalls.connectionId, id));
       if (
-        installs.some(
-          (i) => i.targetType === "company" || i.targetId === agentId,
-        )
+        replaceInitialAccess
+          ? installs.length === 1 && installs[0].targetType === "agent" && installs[0].targetId === agentId
+          : installs.some((i) => i.targetType === "company" || i.targetId === agentId)
       )
         return;
       await tools.putConnectionInstalls(
         id,
         {
           installs: [
-            ...installs.map((i) => ({
+            ...(replaceInitialAccess ? [] : installs.map((i) => ({
               targetType: i.targetType,
               targetId: i.targetId,
-            })),
+            }))),
             { targetType: "agent", targetId: agentId },
           ],
         },
@@ -308,7 +313,7 @@ export function emailConnectionService(
         companyId,
         actorType: "user",
         actorId: actor.userId ?? "board",
-        action: "email.connection.agent_added",
+        action: replaceInitialAccess ? "email.connection.agents_updated" : "email.connection.agent_added",
         entityType: "tool_connection",
         entityId: id,
         details: { agentId },

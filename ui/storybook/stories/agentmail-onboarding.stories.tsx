@@ -59,9 +59,6 @@ const meta = {
         if (method === "PATCH") agent.permissions = body;
         return Response.json({ ...agent, access: { canAssignTasks: false } });
       }
-      if (url.pathname === `/api/tool-connections/${CONNECTION}/installs` && method === "PUT") {
-        return Response.json({ connectionId: CONNECTION, installs: body.installs });
-      }
       if (url.pathname.endsWith("/email/connections") && method === "POST") {
         if (body.apiKey === "invalid-key") return Response.json({ error: "AgentMail rejected the API key. Check it and try again." }, { status: 422 });
         if (body.grantKind !== "organization" || body.allAgents !== false || body.agentIds.length !== 1) {
