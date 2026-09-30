@@ -241,6 +241,11 @@ export function emailConnectionService(
           actorSource: actor.localImplicit ? "local_implicit" : "session",
         },
       );
+      const initialInstalls = await db.select({ id: toolConnectionInstalls.id })
+        .from(toolConnectionInstalls).where(eq(toolConnectionInstalls.connectionId, connection.id));
+      await db.update(toolConnections).set({
+        config: { ...connection.config, emailSetupInitialInstallIds: initialInstalls.map(install => install.id) },
+      }).where(eq(toolConnections.id, connection.id));
       await logActivity(db, {
         companyId,
         actorType: "user",
@@ -277,15 +282,22 @@ export function emailConnectionService(
         )
         .for("update");
       const connection = await emailConnectionService(db, fetchImpl).get(companyId, id, actor);
-      // A key saved by this same setup request belongs only to its final agent.
-      // Reused accounts keep their existing installs. Do this inside email
-      // setup's existing authorization boundary, not the agent-config API.
-      const replaceInitialAccess = connection.uid === `agentmail-account-${setupRequestId}`;
       const tools = toolAccessService(db);
       const installs = await db
         .select()
         .from(toolConnectionInstalls)
         .where(eq(toolConnectionInstalls.connectionId, id));
+      // Apply the setup default once, only if nobody has edited access since
+      // saving the key. Install IDs detect removal/re-addition as well as new
+      // agent/company grants. Later retries always preserve those edits.
+      const initialIds = connection.config.emailSetupInitialInstallIds;
+      const ownsInitialAccess = connection.uid === `agentmail-account-${setupRequestId}` && Array.isArray(initialIds);
+      const replaceInitialAccess = ownsInitialAccess && initialIds.length === installs.length
+        && installs.every(install => initialIds.includes(install.id));
+      if (ownsInitialAccess) {
+        const { emailSetupInitialInstallIds: _initialIds, ...config } = connection.config;
+        await db.update(toolConnections).set({ config }).where(eq(toolConnections.id, id));
+      }
       if (
         replaceInitialAccess
           ? installs.length === 1 && installs[0].targetType === "agent" && installs[0].targetId === agentId

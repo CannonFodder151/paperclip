@@ -211,8 +211,10 @@ by the setup link. Once an inbox has been allocated, its agent and address stay
 fixed during recovery. A failed progress lookup can be retried in place.
 
 When the account and inbox share a setup request ID, completion replaces the
-account’s initial agent access with the final selected agent. Reusing an account
-from another setup preserves its existing installs. Both paths use the email
+account’s untouched initial agent access with the final selected agent. That
+default applies only once and only while the original install rows are unchanged.
+Later permission edits and retries preserve existing agent or company installs.
+Reusing an account from another setup also preserves its existing installs. Both paths use the email
 setup permission (`tools:manage_connections`), without an additional agent-edit
 permission.
 

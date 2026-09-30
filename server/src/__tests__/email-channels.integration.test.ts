@@ -1108,6 +1108,42 @@ describe("AgentMail durable email pipeline", () => {
     }
   });
 
+  it.each([
+    ["before setup", "company"], ["before setup", "agents"],
+    ["after a failed setup", "company"], ["after a failed setup", "agents"],
+  ] as const)("preserves permissions edited %s to include %s access", async (when, scope) => {
+    const f = await fixture("websocket");
+    const actor = { userId: "email-board" };
+    await f.service.control(f.endpointId, "remove", actor);
+    const selectedAgentId = randomUUID(), otherAgentId = randomUUID();
+    await db.insert(agents).values([selectedAgentId, otherAgentId].map(id => ({ id, companyId: f.companyId,
+      name: "Email agent", role: "engineer", status: "idle", adapterType: "process", permissions: {} })));
+    const requestId = randomUUID();
+    const connection = await emailConnectionService(db, f.fetcher).connect(f.companyId, {
+      apiKey: "test-key", grantKind: "organization", allAgents: false, agentIds: [f.agentId], idempotencyKey: requestId,
+    }, actor);
+    const input = { assignedAgentId: selectedAgentId, credentialConnectionId: connection.id,
+      inboxId: f.address, receiveMode: "websocket" as const, idempotencyKey: requestId };
+    if (when === "after a failed setup") {
+      const provider = vi.mocked(f.fetcher).getMockImplementation()!;
+      vi.mocked(f.fetcher).mockImplementation(async (url, init) =>
+        decodeURIComponent(new URL(String(url)).pathname) === `/v0/inboxes/${f.address}`
+          ? new Response(null, { status: 403 }) : provider(url, init));
+      await expect(f.service.setup(f.companyId, input, actor)).rejects.toThrow();
+      vi.mocked(f.fetcher).mockImplementation(provider);
+    }
+    const requestedInstalls = scope === "company"
+      ? [{ targetType: "company" as const, targetId: f.companyId }]
+      : [f.agentId, otherAgentId].map(targetId => ({ targetType: "agent" as const, targetId }));
+    await toolAccessService(db).putConnectionInstalls(connection.id, { installs: requestedInstalls }, { actorType: "user", actorId: actor.userId });
+    const before = await db.select().from(toolConnectionInstalls).where(eq(toolConnectionInstalls.connectionId, connection.id));
+    const result = await f.service.setup(f.companyId, input, actor);
+    expect(result.status).toBe("active");
+    const after = await db.select().from(toolConnectionInstalls).where(eq(toolConnectionInstalls.connectionId, connection.id));
+    for (const install of before) expect(after).toContainEqual(install);
+    expect(after.map(i => i.targetId).sort()).toEqual((scope === "company" ? [f.companyId] : [f.agentId, otherAgentId, selectedAgentId]).sort());
+  });
+
   it.each(["create_inbox", "create_inbox_key", "address_taken"] as const)("reports a provider rejection during %s and resumes the same setup after correction", async (failedOperation) => {
     const f = await fixture("websocket");
     await f.service.control(f.endpointId, "remove", { userId: "email-board" });
