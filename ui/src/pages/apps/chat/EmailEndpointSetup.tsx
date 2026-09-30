@@ -71,14 +71,14 @@ export function EmailEndpointSetup() {
   const { selectedCompanyId } = useCompany();
   const [params] = useSearchParams();
   if (!selectedCompanyId) return <p role="status" className="p-6 text-sm text-muted-foreground">Loading email setup…</p>;
-  return <EmailEndpointSetupForm key={`${selectedCompanyId}:${params.get("connectionId") ?? "new"}`} companyId={selectedCompanyId} />;
+  return <EmailEndpointSetupForm key={`${selectedCompanyId}:${params.get("connectionId") ?? "new"}:${params.get("agentId") ?? "choose"}`} companyId={selectedCompanyId} />;
 }
 
 function EmailEndpointSetupForm({ companyId }: { companyId: string }) {
   const [params] = useSearchParams();
   const navigate = useNavigate();
   const cache = useQueryClient();
-  const draftKey = `paperclip.agentmail-setup:${companyId}:${params.get("connectionId") ?? "new"}`;
+  const draftKey = `paperclip.agentmail-setup:${companyId}:${params.get("connectionId") ?? "new"}:${params.get("agentId") ?? "choose"}`;
   const [draft] = useState(() => readEmailSetupDraft(draftKey));
   const [connectionId, setConnectionId] = useState(draft.connectionId ?? params.get("connectionId") ?? "");
   const [step, setStep] = useState<0 | 1 | 2>(draft.step ?? 0);
@@ -116,6 +116,13 @@ function EmailEndpointSetupForm({ companyId }: { companyId: string }) {
     enabled: !!companyId && !!connectionId, retry: false });
   const inboxes = useQuery({ queryKey: ["email-inboxes", companyId],
     queryFn: () => emailApi.list(companyId), enabled: !!companyId });
+  // A provider failure can leave an inbox allocated under this request. Resume
+  // that exact endpoint; its agent and address are already fixed server-side.
+  const pendingEndpoint = inboxes.data?.find(i => i.id === requestId && i.status !== "archived");
+  const pendingAddress = pendingEndpoint?.address;
+  useEffect(() => {
+    if (pendingEndpoint) setAgentId(pendingEndpoint.assignedAgentId);
+  }, [pendingEndpoint]);
   const scopedKey = inspected.data?.scope.scope_type === "inbox";
   useEffect(() => {
     if (scopedKey) {
@@ -131,14 +138,22 @@ function EmailEndpointSetupForm({ companyId }: { companyId: string }) {
   }, [chosen, username]);
   const connect = useMutation({
     mutationFn: async () => {
-      if (!connectionId) {
+      let savedConnectionId = connectionId;
+      if (!savedConnectionId) {
         const result = await emailApi.connect(companyId, {
           apiKey: apiKey.trim(), grantKind: "organization", allAgents: false,
           agentIds: [agentId], idempotencyKey: requestId,
         });
+        savedConnectionId = result.id;
         setApiKey("");
         setConnectionId(result.id);
         void cache.invalidateQueries({ queryKey: queryKeys.tools.connections(companyId) });
+      }
+      // Only this new-account flow owns its initial access defaults. Reused
+      // accounts keep their existing grants; setup adds the selected agent.
+      if (!params.get("connectionId")) {
+        await toolsApi.putConnectionInstalls(savedConnectionId, [{ targetType: "agent", targetId: agentId }]);
+        void cache.invalidateQueries({ queryKey: queryKeys.tools.connectionInstalls(savedConnectionId) });
       }
     },
     onSuccess: () => setStep(1),
@@ -160,27 +175,31 @@ function EmailEndpointSetupForm({ companyId }: { companyId: string }) {
   const setup = useMutation({
     mutationFn: () => emailApi.setup(companyId, {
       assignedAgentId: agentId, credentialConnectionId: connectionId,
-      ...(addressMode === "existing" ? { inboxId } : { username, domain }),
+      ...(pendingAddress ? { inboxId: pendingAddress } : addressMode === "existing" ? { inboxId } : { username, domain }),
       receiveMode: mode, idempotencyKey: requestId,
     }),
+    onError: async () => {
+      await cache.invalidateQueries({ queryKey: ["email-inboxes", companyId] });
+    },
     onSuccess: () => {
       void cache.invalidateQueries({ queryKey: ["email-inboxes", companyId] });
       void cache.invalidateQueries({ queryKey: queryKeys.tools.connectionInstalls(connectionId) });
       setStep(2);
     },
   });
-  const address = addressMode === "existing" ? inboxId : `${username}@${domain}`;
-  const knownAddress = addressMode === "new" && inspected.data?.inboxes.some(i => i.inbox_id.toLowerCase() === address.toLowerCase());
+  const address = pendingAddress ?? (addressMode === "existing" ? inboxId : `${username}@${domain}`);
+  const knownAddress = !pendingAddress && addressMode === "new" && inspected.data?.inboxes.some(i => i.inbox_id.toLowerCase() === address.toLowerCase());
   const addressTaken = knownAddress || (setup.error instanceof ApiError
     && (setup.error.body as { code?: string } | null)?.code === "agentmail_address_taken");
-  const assignedInbox = addressMode === "existing" && inboxes.data?.some(i => i.address === inboxId && i.status !== "archived");
+  const assignedInbox = addressMode === "existing" && inboxes.data?.some(i => i.id !== requestId && i.address === address && i.status !== "archived");
   const addressError = addressTaken ? "This email address is already in use. Choose a different address."
     : assignedInbox ? "This inbox is already assigned to an agent." : null;
   const error = connect.error ?? (!addressTaken ? setup.error : null) ?? inspected.error ?? agents.error ?? inboxes.error;
   const busy = connect.isPending || setup.isPending;
-  const canContinue = !!chosen && !busy && !(lowTrust && !scoped) && (!!connectionId || !!apiKey.trim());
-  const canCreate = !!chosen && !busy && !!inspected.data && !(lowTrust && !scoped) && !addressError
-    && (addressMode === "existing" ? !!inboxId : /^[a-z0-9][a-z0-9._-]*$/.test(username));
+  const identityReady = inboxes.isSuccess && (!pendingEndpoint || pendingEndpoint.assignedAgentId === agentId);
+  const canContinue = identityReady && !!chosen && !busy && !(lowTrust && !scoped) && (!!connectionId || !!apiKey.trim());
+  const canCreate = identityReady && !!chosen && !busy && !!inspected.data && !(lowTrust && !scoped) && !addressError
+    && (!!pendingAddress || (addressMode === "existing" ? !!inboxId : /^[a-z0-9][a-z0-9._-]*$/.test(username)));
   const openTrust = () => { if (chosen) { setPermissions(chosen.permissions); setTrustOpen(true); } };
   const leave = () => navigate(connectionId ? `/apps/${connectionId}/permissions` : "/apps");
   const cancel = () => { try { sessionStorage.removeItem(draftKey); } catch {} leave(); };
@@ -193,7 +212,7 @@ function EmailEndpointSetupForm({ companyId }: { companyId: string }) {
     {step === 0 && <form className="space-y-6" onSubmit={event => { event.preventDefault(); if (canContinue) connect.mutate(); }}>
       <div className="space-y-2">
         <Label>Agent</Label>
-        <SearchableSelect value={agentId} disabled={busy} loading={agents.isPending} placeholder="Choose an agent" searchPlaceholder="Search all agents…" emptyMessage="No agents found."
+        <SearchableSelect value={agentId} disabled={busy || !inboxes.isSuccess || !!pendingEndpoint} loading={agents.isPending} placeholder="Choose an agent" searchPlaceholder="Search all agents…" emptyMessage="No agents found."
           groups={[{ id: "agents", options: (agents.data ?? []).filter(a => !["terminated", "pending_approval"].includes(a.status))
             .map(a => ({ key: a.id, value: a.id, label: a.name, icon: a.icon })) }]}
           onValueChange={(id, option) => { setAgentId(id); setUsername(option.label.toLowerCase().replace(/[^a-z0-9._-]+/g, "-").slice(0, 64)); }}
@@ -215,22 +234,23 @@ function EmailEndpointSetupForm({ companyId }: { companyId: string }) {
         <Label htmlFor={addressMode === "new" ? "email-name" : "email-existing"}>{chosen?.name}’s email address</Label>
         {addressMode === "new" ? <>
           <div className="flex items-center gap-2">
-            <Input id="email-name" className="min-w-0" value={username} maxLength={64} autoComplete="off" spellCheck={false} disabled={busy}
+            <Input id="email-name" className="min-w-0" value={pendingAddress ? pendingAddress.slice(0, pendingAddress.lastIndexOf("@")) : username} maxLength={64} autoComplete="off" spellCheck={false} disabled={busy} readOnly={!!pendingAddress}
               aria-invalid={!!addressError} aria-describedby={addressError ? "email-address-error" : undefined}
               onChange={event => { setUsername(event.target.value.toLowerCase()); setup.reset(); }} />
-            <span className="max-w-1/2 shrink-0 break-all text-sm text-muted-foreground">@{domain}</span>
+            <span className="max-w-1/2 shrink-0 break-all text-sm text-muted-foreground">@{pendingAddress ? pendingAddress.slice(pendingAddress.lastIndexOf("@") + 1) : domain}</span>
           </div>
-        </> : <select id="email-existing" className={selectClass} value={inboxId} disabled={busy || scopedKey}
+        </> : <select id="email-existing" className={selectClass} value={pendingAddress ?? inboxId} disabled={busy || scopedKey || !!pendingAddress}
           aria-invalid={!!addressError} aria-describedby={addressError ? "email-address-error" : undefined}
           onChange={event => { setInboxId(event.target.value); setup.reset(); }}>
           <option value="">Choose an inbox</option>
           {inspected.data?.inboxes.map(i => {
-            const assigned = inboxes.data?.some(e => e.address === i.inbox_id && e.status !== "archived");
+            const assigned = inboxes.data?.some(e => e.id !== requestId && e.address === i.inbox_id && e.status !== "archived");
             return <option key={i.inbox_id} value={i.inbox_id} disabled={assigned}>{i.inbox_id}{assigned ? " — already assigned" : ""}</option>;
           })}
         </select>}
+        {pendingAddress && <p className="text-sm text-muted-foreground">This address is reserved for {chosen?.name}. Continue to finish connecting it.</p>}
         {addressError && <p id="email-address-error" role="alert" className="text-sm text-destructive">{addressError}</p>}
-        {!scopedKey && <Button type="button" variant="link" size="sm" className="h-auto p-0" disabled={busy}
+        {!scopedKey && !pendingAddress && <Button type="button" variant="link" size="sm" className="h-auto p-0" disabled={busy}
           onClick={() => { setAddressMode(addressMode === "new" ? "existing" : "new"); setup.reset(); }}>
           {addressMode === "new" ? "Use an existing inbox" : "Create a new address"}
         </Button>}
@@ -241,7 +261,7 @@ function EmailEndpointSetupForm({ companyId }: { companyId: string }) {
         <div className="space-y-4">
           {addressMode === "new" && <div className="space-y-2">
             <Label htmlFor="email-domain">Domain</Label>
-            <select id="email-domain" value={domain} disabled={busy} className={selectClass} onChange={event => { setDomain(event.target.value); setup.reset(); }}>
+            <select id="email-domain" value={pendingAddress ? pendingAddress.slice(pendingAddress.lastIndexOf("@") + 1) : domain} disabled={busy || !!pendingAddress} className={selectClass} onChange={event => { setDomain(event.target.value); setup.reset(); }}>
               <option>agentmail.to</option>
               {inspected.data?.domains.filter(d => d.status === "VERIFIED").map(d => <option key={d.domain_id}>{d.domain}</option>)}
             </select>
@@ -265,7 +285,7 @@ function EmailEndpointSetupForm({ companyId }: { companyId: string }) {
       <div className="flex items-center justify-between gap-3 border-t border-border pt-5">
         <Button type="button" variant="ghost" disabled={busy} onClick={() => { setup.reset(); setStep(0); }}><ArrowLeft className="size-4" />Back</Button>
         <Button disabled={!canCreate}>
-          {setup.isPending ? "Connecting…" : addressMode === "new" ? "Create email address" : "Connect email address"}<ArrowRight className="size-4" />
+          {setup.isPending ? "Connecting…" : pendingAddress ? "Finish connecting" : addressMode === "new" ? "Create email address" : "Connect email address"}<ArrowRight className="size-4" />
         </Button>
       </div>
     </form>}
