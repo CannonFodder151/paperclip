@@ -13,6 +13,13 @@ There is no separate review or Permissions detour. Each provider thread in the
 inbox becomes one Paperclip task. Subjects are not identifiers. The same email
 delivered to two connected inboxes creates two independent tasks.
 
+**Add connection** starts a fresh setup identity, so an earlier unfinished key
+or address cannot silently replace the new form. **Finish setup** on a draft row
+resumes that exact inbox with its saved account and request ID, including an
+address already allocated before a later provider failure. Cancel and Done
+return to Connectors; Email settings opens the inbox settings. The email step
+groups the task/thread explanation under **How it Works**.
+
 Get API keys from [AgentMail's API-key page](https://console.agentmail.to/dashboard/api-keys).
 When an agent requests AgentMail in a chat or task, an inline card asks only for
 the key. It defaults to company-wide human access and this agent only, then

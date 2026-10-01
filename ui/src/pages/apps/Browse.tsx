@@ -806,7 +806,8 @@ export function ConnectorCard({
           disabled={!action.href}
           title={action.title}
           onClick={() => {
-            if (action.href) onNavigate(action.href);
+            if (action.href) onNavigate(row.slug === "agentmail"
+              ? `${action.href}&setupId=${crypto.randomUUID()}` : action.href);
           }}
           aria-label={`${action.label} ${row.name}`}
         >

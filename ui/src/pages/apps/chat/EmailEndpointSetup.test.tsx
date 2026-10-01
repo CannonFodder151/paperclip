@@ -2,17 +2,17 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, useLocation } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "@/api/client";
 import { EmailEndpointSetup } from "./EmailEndpointSetup";
 
-const mocks = vi.hoisted(() => ({ companyId: "company" as string | null, listAgents: vi.fn(), connect: vi.fn(), inspect: vi.fn(), checkAddress: vi.fn(), setup: vi.fn(), listInboxes: vi.fn(), listConnections: vi.fn(), putInstalls: vi.fn() }));
+const mocks = vi.hoisted(() => ({ companyId: "company" as string | null, listAgents: vi.fn(), connect: vi.fn(), inspect: vi.fn(), checkAddress: vi.fn(), setup: vi.fn(), listInboxes: vi.fn(), listConnections: vi.fn(), getConnection: vi.fn(), putInstalls: vi.fn() }));
 vi.mock("@/lib/router", async () => import("react-router-dom"));
 vi.mock("@/context/CompanyContext", () => ({ useCompany: () => ({ selectedCompanyId: mocks.companyId }) }));
 vi.mock("@/components/chat/ChatSetupNavigation", () => ({ ChatSetupNavigation: () => null }));
 vi.mock("@/api/agents", () => ({ agentsApi: { list: mocks.listAgents } }));
-vi.mock("@/api/tools", () => ({ toolsApi: { putConnectionInstalls: mocks.putInstalls, listConnections: mocks.listConnections } }));
+vi.mock("@/api/tools", () => ({ toolsApi: { putConnectionInstalls: mocks.putInstalls, listConnections: mocks.listConnections, getConnection: mocks.getConnection } }));
 vi.mock("@/api/email", () => ({ emailApi: { connect: mocks.connect, inspectSaved: mocks.inspect, checkAddress: mocks.checkAddress, setup: mocks.setup, list: mocks.listInboxes } }));
 
 let container: HTMLDivElement;
@@ -29,7 +29,7 @@ beforeEach(() => {
   mocks.listInboxes.mockResolvedValue([]);
   mocks.listConnections.mockResolvedValue({ connections: [] });
   mocks.connect.mockResolvedValue({ id: "account" });
-  mocks.setup.mockResolvedValue({ address: "ralph-team@agentmail.to", connectionId: "inbox" });
+  mocks.setup.mockResolvedValue({ id: "endpoint", address: "ralph-team@agentmail.to", connectionId: "inbox" });
   container = document.createElement("div");
   document.body.append(container);
   root = createRoot(container);
@@ -41,11 +41,12 @@ afterEach(async () => {
   vi.unstubAllGlobals();
   vi.useRealTimers();
 });
-async function mount(saved = true, waitForCompany = true, agentId = "ralph") {
+function Location() { return <output data-testid="location">{useLocation().pathname}</output>; }
+async function mount(saved = true, waitForCompany = true, agentId = "ralph", search = "") {
   client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
   await act(async () => root.render(<QueryClientProvider client={client}><MemoryRouter initialEntries={[
-    `/apps/chat/connect?provider=agentmail&agentId=${agentId}${saved ? "&connectionId=account" : ""}`,
-  ]}><EmailEndpointSetup /></MemoryRouter></QueryClientProvider>));
+    `/apps/chat/connect?provider=agentmail&agentId=${agentId}${saved ? "&connectionId=account" : ""}${search}`,
+  ]}><EmailEndpointSetup /><Location /></MemoryRouter></QueryClientProvider>));
   if (waitForCompany) await vi.waitFor(() => expect(container.textContent).toContain(agentId === "support" ? "Support" : "Ralph"));
 }
 function button(name: string) {
@@ -67,6 +68,66 @@ async function fill(selector: string, value: string) {
 }
 
 describe("AgentMail two-step setup", () => {
+  it("starts a fresh catalog connection without adopting a previous draft's key or email step", async () => {
+    sessionStorage.setItem("paperclip.agentmail-setup:company:new:ralph", JSON.stringify({
+      connectionId: "old-inbox-key", step: 1, agentId: "ralph", requestId: crypto.randomUUID(),
+      addressMode: "existing", inboxId: "locked@agentmail.to",
+    }));
+    const setupId = crypto.randomUUID();
+    await mount(false, true, "ralph", `&setupId=${setupId}`);
+    expect(container.querySelector('input[type="password"]')).not.toBeNull();
+    expect(mocks.inspect).not.toHaveBeenCalled();
+    await fill('input[type="password"]', "organization-test-key");
+    await click("Continue");
+    await vi.waitFor(() => expect(container.querySelector("#email-name")).not.toBeNull());
+    expect(mocks.connect).toHaveBeenCalledWith("company", expect.objectContaining({ idempotencyKey: setupId }));
+    expect(container.textContent).toContain("How it Works");
+    expect(container.querySelector('[data-testid="location"]')?.textContent).toBe("/apps/chat/connect");
+  });
+
+  it("resumes the catalog's exact reserved inbox with its original account and request ID", async () => {
+    const requestId = crypto.randomUUID();
+    mocks.listInboxes.mockResolvedValue([{
+      id: requestId, connectionId: "inbox-connection", assignedAgentId: "ralph",
+      address: "reserved@paperclip.example", status: "draft", receiveMode: "websocket",
+    }]);
+    mocks.getConnection.mockResolvedValue({ config: { credentialConnectionId: "original-account" } });
+    await mount(false, true, "", `&resume=${requestId}`);
+    await vi.waitFor(() => expect(button("Finish connecting").disabled).toBe(false));
+    expect(mocks.inspect).toHaveBeenCalledWith("company", "original-account");
+    expect(container.querySelector<HTMLInputElement>("#email-name")?.value).toBe("reserved");
+    expect(container.querySelector<HTMLSelectElement>("#email-domain")?.value).toBe("paperclip.example");
+    await click("Finish connecting");
+    expect(mocks.setup).toHaveBeenCalledWith("company", expect.objectContaining({
+      idempotencyKey: requestId, credentialConnectionId: "original-account", inboxId: "reserved@paperclip.example",
+    }));
+    expect(mocks.connect).not.toHaveBeenCalled();
+  });
+
+  it("blocks a missing resume target rather than creating another inbox", async () => {
+    await mount(false, true, "ralph", `&resume=${crypto.randomUUID()}`);
+    await vi.waitFor(() => expect(container.textContent).toContain("This email setup could not be found"));
+    expect(button("Create email address").disabled).toBe(true);
+    expect(mocks.connect).not.toHaveBeenCalled();
+    expect(mocks.setup).not.toHaveBeenCalled();
+  });
+
+  it("returns Cancel to Connectors rather than the credential permissions page", async () => {
+    await mount();
+    await click("Cancel");
+    expect(container.querySelector('[data-testid="location"]')?.textContent).toBe("/apps");
+  });
+
+  it.each(["Done", "Email settings"])("sends %s to its email destination after completion", async action => {
+    await mount();
+    await click("Continue");
+    await click("Create email address");
+    await vi.waitFor(() => expect(container.textContent).toContain("Your agent’s email is ready"));
+    await click(action);
+    expect(container.querySelector('[data-testid="location"]')?.textContent)
+      .toBe(action === "Done" ? "/apps" : "/apps/chat/endpoint/settings");
+  });
+
   it("recovers an inbox-only key even after a failed attempt leaves an unallocated draft", async () => {
     mocks.inspect.mockImplementation(async (_company, id) => id === "account"
       ? { scope: { scope_type: "inbox" }, inboxes: [{ inbox_id: "locked@agentmail.to" }], domains: [] }

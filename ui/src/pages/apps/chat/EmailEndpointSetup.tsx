@@ -21,6 +21,7 @@ import { emailApi } from "@/api/email";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Card, CardHeader, CardDescription } from "@/components/ui/card";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { AgentIcon } from "@/components/AgentIconPicker";
 import { SearchableSelect } from "@/components/SearchableSelect";
@@ -78,20 +79,22 @@ export function EmailEndpointSetup() {
   const { selectedCompanyId } = useCompany();
   const [params] = useSearchParams();
   if (!selectedCompanyId) return <p role="status" className="p-6 text-sm text-muted-foreground">Loading email setup…</p>;
-  return <EmailEndpointSetupForm key={`${selectedCompanyId}:${params.get("connectionId") ?? "new"}:${params.get("agentId") ?? "choose"}`} companyId={selectedCompanyId} />;
+  return <EmailEndpointSetupForm key={`${selectedCompanyId}:${params.get("resume") ?? params.get("setupId") ?? params.get("connectionId") ?? "new"}:${params.get("agentId") ?? "choose"}`} companyId={selectedCompanyId} />;
 }
 
 function EmailEndpointSetupForm({ companyId }: { companyId: string }) {
   const [params] = useSearchParams();
   const navigate = useNavigate();
   const cache = useQueryClient();
-  const draftKey = `paperclip.agentmail-setup:${companyId}:${params.get("connectionId") ?? "new"}:${params.get("agentId") ?? "choose"}`;
+  const resumeId = params.get("resume");
+  const setupId = params.get("setupId");
+  const draftKey = `paperclip.agentmail-setup:${companyId}:${resumeId ?? setupId ?? params.get("connectionId") ?? "new"}:${params.get("agentId") ?? "choose"}`;
   const [draft] = useState(() => readEmailSetupDraft(draftKey));
   const [connectionId, setConnectionId] = useState(draft.connectionId ?? params.get("connectionId") ?? "");
-  const [step, setStep] = useState<0 | 1 | 2>(draft.step ?? 0);
+  const [step, setStep] = useState<0 | 1 | 2>(draft.step ?? (resumeId ? 1 : 0));
   const [agentId, setAgentId] = useState(draft.agentId ?? params.get("agentId") ?? "");
   const [apiKey, setApiKey] = useState("");
-  const [requestId, setRequestId] = useState(() => draft.requestId ?? crypto.randomUUID());
+  const [requestId, setRequestId] = useState(() => draft.requestId ?? resumeId ?? (setupId && isUuidLike(setupId) ? setupId : crypto.randomUUID()));
   const [addressMode, setAddressMode] = useState<"new" | "existing">(draft.addressMode ?? "new");
   const [inboxId, setInboxId] = useState(draft.inboxId ?? "");
   const [username, setUsername] = useState(draft.username ?? "");
@@ -133,6 +136,19 @@ function EmailEndpointSetupForm({ companyId }: { companyId: string }) {
   // that exact endpoint; its agent and address are already fixed server-side.
   const pendingEndpoint = inboxes.data?.find(i => i.id === requestId && i.status !== "archived");
   const pendingAddress = pendingEndpoint?.address;
+  const resumeAccount = useQuery({
+    queryKey: ["email-resume-account", companyId, pendingEndpoint?.connectionId],
+    queryFn: () => toolsApi.getConnection(pendingEndpoint!.connectionId),
+    enabled: !!resumeId && requestId === resumeId && !!pendingEndpoint && !connectionId,
+    retry: false,
+  });
+  useEffect(() => {
+    if (!resumeId || !pendingEndpoint || connectionId || !resumeAccount.isSuccess) return;
+    const savedAccount = resumeAccount.data?.config?.credentialConnectionId;
+    if (typeof savedAccount === "string") setConnectionId(savedAccount);
+    else setStep(0);
+    setMode(pendingEndpoint.receiveMode);
+  }, [resumeId, pendingEndpoint, connectionId, resumeAccount.isSuccess, resumeAccount.data]);
   useEffect(() => {
     if (pendingEndpoint) setAgentId(pendingEndpoint.assignedAgentId);
   }, [pendingEndpoint]);
@@ -237,6 +253,8 @@ function EmailEndpointSetupForm({ companyId }: { companyId: string }) {
     },
     onSuccess: () => {
       void cache.invalidateQueries({ queryKey: ["email-inboxes", companyId] });
+      void cache.invalidateQueries({ queryKey: queryKeys.chatEndpoints.list(companyId) });
+      void cache.invalidateQueries({ queryKey: queryKeys.tools.connections(companyId) });
       void cache.invalidateQueries({ queryKey: queryKeys.tools.connectionInstalls(connectionId) });
       setStep(2);
     },
@@ -256,15 +274,15 @@ function EmailEndpointSetupForm({ companyId }: { companyId: string }) {
   const assignedInbox = addressMode === "existing" && inboxes.data?.some(i => i.id !== requestId && i.address === address && i.status !== "archived");
   const addressError = addressTaken ? "This email address is already in use. Choose a different address."
     : assignedInbox ? "This inbox is already assigned to an agent." : null;
-  const error = connect.error ?? (!addressTaken ? setup.error : null) ?? inspected.error ?? agents.error;
+  const error = connect.error ?? (!addressTaken ? setup.error : null) ?? resumeAccount.error ?? inspected.error ?? agents.error;
   const busy = connect.isPending || setup.isPending;
-  const identityReady = inboxes.isSuccess && (!pendingEndpoint || pendingEndpoint.assignedAgentId === agentId);
+  const identityReady = inboxes.isSuccess && (!resumeId || requestId !== resumeId || !!pendingEndpoint) && (!pendingEndpoint || pendingEndpoint.assignedAgentId === agentId);
   const canContinue = identityReady && !!chosen && !busy && !(lowTrust && !scoped) && (!!connectionId || !!apiKey.trim());
   const canCreate = identityReady && !!chosen && !busy && !!inspected.data && !(lowTrust && !scoped) && !addressError && !addressCheck.checking
     && (!!pendingAddress || (addressMode === "existing" ? !!inboxId : validUsername));
   const openTrust = () => { if (chosen) { setPermissions(chosen.permissions); setTrustOpen(true); } };
-  const leave = () => navigate(connectionId ? `/apps/${connectionId}/permissions` : "/apps");
-  const cancel = () => { try { sessionStorage.removeItem(draftKey); } catch {} leave(); };
+  const leave = () => navigate(`/apps/chat/${setup.data?.id ?? pendingEndpoint?.id}/settings`);
+  const cancel = () => { try { sessionStorage.removeItem(draftKey); } catch {} navigate("/apps"); };
   return <div className="mx-auto max-w-xl space-y-6 p-6">
     <header className="space-y-2">
       <h1 className="text-xl font-bold">{step === 2 ? "Your agent’s email is ready" : "Give an agent an email address"}</h1>
@@ -275,6 +293,7 @@ function EmailEndpointSetupForm({ companyId }: { companyId: string }) {
         {inboxes.isFetching ? "Loading…" : "Retry loading inboxes"}
       </Button>
     </div>}
+    {step < 2 && resumeId === requestId && inboxes.isSuccess && !pendingEndpoint && <p role="alert" className="text-sm text-destructive">This email setup could not be found. Return to Connectors and start a new connection.</p>}
     {step < 2 && <ChatSetupNavigation labels={["Agent", "Email address"]} step={step}
       availableStep={step} disabled={busy} onSelect={index => { setup.reset(); setStep(index as 0 | 1); }} />}
     {step === 0 && <form className="space-y-6" onSubmit={event => { event.preventDefault(); if (canContinue) connect.mutate(); }}>
@@ -343,8 +362,13 @@ function EmailEndpointSetupForm({ companyId }: { companyId: string }) {
           onClick={() => { setAddressMode(addressMode === "new" ? "existing" : "new"); setup.reset(); }}>
           {addressMode === "new" ? "Use an existing inbox" : "Create a new address"}
         </Button>}
-        <p className="text-sm text-muted-foreground">Incoming email creates tasks for {chosen?.name}. Replies stay in the same task.</p>
       </div>
+      <Card className="py-4">
+        <CardHeader className="px-4">
+          <h2 className="text-sm font-medium">How it Works</h2>
+          <CardDescription>Incoming email creates tasks for {chosen?.name}. Replies stay in the same task.</CardDescription>
+        </CardHeader>
+      </Card>
       <details className="space-y-4">
         <summary className="cursor-pointer text-sm text-muted-foreground">Advanced options</summary>
         <div className="space-y-4">
@@ -377,7 +401,7 @@ function EmailEndpointSetupForm({ companyId }: { companyId: string }) {
       <div className="space-y-2"><p className="flex items-center gap-2 font-medium"><Check className="size-4" />{setup.data?.address}</p>
         <p className="text-sm text-muted-foreground">{chosen?.name} can now receive email at this address.</p></div>
       <div className="flex items-center justify-between gap-3 border-t border-border pt-5">
-        <Button variant="ghost" onClick={leave}>Email settings</Button><Button onClick={leave}>Done</Button>
+        <Button variant="ghost" onClick={leave}>Email settings</Button><Button onClick={() => navigate("/apps")}>Done</Button>
       </div>
     </div>}
       <Dialog open={accountOpen} onOpenChange={open => {

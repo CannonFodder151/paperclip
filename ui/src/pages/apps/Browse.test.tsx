@@ -511,6 +511,19 @@ describe("Connectors landing page", () => {
     );
   });
 
+  it("starts each AgentMail Add connection with a distinct setup identity", async () => {
+    chatListMock.mockResolvedValue([{ id: "chat-draft", provider: "agentmail", status: "draft", assignedAgentName: "Ralph" }]);
+    await renderBrowse();
+    const add = container.querySelector<HTMLButtonElement>('button[aria-label="Add connection AgentMail"]')!;
+    await act(() => add.click());
+    const first = new URL(navigateMock.mock.lastCall![0], "http://localhost");
+    expect(first.pathname).toBe("/apps/chat/connect");
+    expect(first.searchParams.get("provider")).toBe("agentmail");
+    expect(first.searchParams.get("setupId")).toMatch(/^[0-9a-f-]{36}$/);
+    await act(() => add.click());
+    expect(navigateMock.mock.lastCall![0]).not.toBe(first.pathname + first.search);
+  });
+
   it.each(["slack", "discord", "telegram", "github", "microsoft-teams", "agentmail", "imessage-photon"])(
     "puts Manage and removal in the %s chat menu while keeping draft setup visible",
     async (provider) => {
