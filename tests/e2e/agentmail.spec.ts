@@ -51,6 +51,7 @@ test("AgentMail setup and email work through the normal task conversation", asyn
     lastError: null,
     lastSyncAt: new Date().toISOString(),
   };
+  const organizationConnectionId = randomUUID();
   let connected = false;
   const setupRequests: { idempotencyKey: string; username?: string }[] = [];
   const addressTakenError = "This email address is already in use. Choose a different address.";
@@ -85,6 +86,12 @@ test("AgentMail setup and email work through the normal task conversation", asyn
   await page.route("**/api/instance/settings/experimental", (route) =>
     fulfill(route, { enableChatConnectors: true }),
   );
+  await page.route(`**/api/companies/${company.id}/tools/connections`, route =>
+    fulfill(route, { connections: [{
+      id: organizationConnectionId, name: "AgentMail", status: "active", enabled: true,
+      config: { provider: "agentmail", emailCredential: true }, createdAt: "2026-09-30T14:00:00Z",
+    }] }),
+  );
   await page.route("**/api/**/email/**", async (route) => {
     const url = new URL(route.request().url()),
       method = route.request().method();
@@ -92,6 +99,10 @@ test("AgentMail setup and email work through the normal task conversation", asyn
       const body = route.request().postDataJSON();
       return fulfill(route, { address: `${body.username}@${body.domain}`, status: body.username === "taken" ? "taken" : "unknown" });
     }
+    if (url.pathname.endsWith(`/connections/${inbox.connectionId}/inspect`))
+      return fulfill(route, {
+        scope: { scope_type: "inbox" }, inboxes: [{ inbox_id: inbox.address }], domains: [],
+      });
     if (url.pathname.endsWith("/inspect"))
       return fulfill(route, {
         scope: { scope_type: "organization" },
@@ -110,6 +121,7 @@ test("AgentMail setup and email work through the normal task conversation", asyn
       const body = route.request().postDataJSON();
       expect(body.receiveMode).toBe("websocket");
       expect(body.assignedAgentId).toBe(agent.id);
+      expect(body.credentialConnectionId).toBe(organizationConnectionId);
       setupRequests.push(body);
       if (setupRequests.length === 1) return fulfill(route, { error: addressTakenError, code: "agentmail_address_taken",
         details: { field: "username", providerStatus: 403, operation: "create_inbox" } }, 409);
@@ -157,9 +169,18 @@ test("AgentMail setup and email work through the normal task conversation", asyn
   await page.getByPlaceholder("Search all agents…").fill("Mail agent");
   await page.getByRole("option", { name: "Mail agent" }).click();
   await page.getByRole("button", { name: "Continue", exact: true }).click();
+  await expect(page.getByText(`This API key can only use ${inbox.address}.`, { exact: false })).toBeVisible();
+  await expect(page.getByLabel("Mail agent’s email address", { exact: true })).toBeDisabled();
+  await page.screenshot({ path: test.info().outputPath("agentmail-inbox-key-recovery.png"), fullPage: true });
+  await page.getByRole("button", { name: "Change AgentMail account" }).click();
+  await page.getByLabel("AgentMail account", { exact: true }).selectOption(organizationConnectionId);
+  await page.getByRole("button", { name: "Use this account" }).click();
   const addressField = page.getByLabel("Mail agent’s email address", { exact: true });
   await expect(addressField).toHaveValue("mail-agent");
   await expect(page.getByLabel("Email domain", { exact: true })).toHaveValue("verified.example.test");
+  await page.getByLabel("Email domain", { exact: true }).selectOption("agentmail.to");
+  await expect(page.getByLabel("Email domain", { exact: true })).toHaveValue("agentmail.to");
+  await page.getByLabel("Email domain", { exact: true }).selectOption("verified.example.test");
   await addressField.fill("taken");
   await expect(page.getByRole("alert")).toHaveText(addressTakenError);
   expect(setupRequests).toHaveLength(0);

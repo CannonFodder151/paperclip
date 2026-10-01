@@ -10,6 +10,7 @@ import { storybookAgents } from "../fixtures/paperclipData";
 
 const COMPANY = "company-storybook";
 const CONNECTION = "agentmail-storybook-account";
+const OTHER_ACCOUNT = "agentmail-storybook-organization";
 const ADDRESS_TAKEN = "This email address is already in use. Choose a different address.";
 const agents = storybookAgents.map((agent, index) => ({
   ...agent, name: ["Ralph", "Support", "Research"][index] ?? agent.name,
@@ -54,6 +55,10 @@ const meta = {
       const method = init?.method ?? "GET";
       const body = init?.body ? JSON.parse(String(init.body)) : {};
       if (url.pathname === `/api/companies/${COMPANY}/agents`) return Response.json(fixtureAgents);
+      if (url.pathname === `/api/companies/${COMPANY}/tools/connections`) return Response.json({ connections: [{
+        id: OTHER_ACCOUNT, name: "AgentMail", status: "active", enabled: true,
+        config: { provider: "agentmail", emailCredential: true }, createdAt: "2026-09-30T14:00:00Z",
+      }] });
       const agent = fixtureAgents.find(agent => url.pathname === `/api/agents/${agent.id}` || url.pathname === `/api/agents/${agent.id}/permissions`);
       if (agent) {
         if (method === "PATCH") agent.permissions = body;
@@ -66,12 +71,15 @@ const meta = {
         }
         return Response.json({ id: CONNECTION }, { status: 201 });
       }
-      if (url.pathname.endsWith("/email/connections/" + CONNECTION + "/inspect")) return Response.json({
-        scope: { scope_type: scenario.scopedKey ? "inbox" : "organization" },
-        inboxes: [{ inbox_id: "support@agentmail.to" }, { inbox_id: "help@paperclip.example" }],
-        domains: scenario.noCustomDomain ? [] : [{ domain_id: "custom-domain", domain: "paperclip.example", status: "VERIFIED" }],
-      });
-      if (url.pathname.endsWith("/email/connections/" + CONNECTION + "/check-address")) {
+      if ([CONNECTION, OTHER_ACCOUNT].some(id => url.pathname.endsWith(`/email/connections/${id}/inspect`))) {
+        const restricted = scenario.scopedKey && url.pathname.includes(CONNECTION);
+        return Response.json({
+          scope: { scope_type: restricted ? "inbox" : "organization" },
+          inboxes: restricted ? [{ inbox_id: "support@agentmail.to" }] : [{ inbox_id: "support@agentmail.to" }, { inbox_id: "help@paperclip.example" }],
+          domains: restricted || scenario.noCustomDomain ? [] : [{ domain_id: "custom-domain", domain: "paperclip.example", status: "VERIFIED" }],
+        });
+      }
+      if ([CONNECTION, OTHER_ACCOUNT].some(id => url.pathname.endsWith(`/email/connections/${id}/check-address`))) {
         if (scenario.checkFailed) return Response.json({ error: "AgentMail is rate limiting requests. Wait a moment, then try again." }, { status: 429 });
         return Response.json({ address: `${body.username}@${body.domain}`,
           status: body.username === "taken" || (scenario.initialTaken && body.username === "ralph") ? "taken" : "unknown" });
@@ -130,6 +138,27 @@ export const ExistingInbox: Story = { name: "Use an existing inbox", play: async
   await chooseAddress(context);
   await userEvent.click(within(context.canvasElement).getByRole("button", { name: "Use an existing inbox" }));
 } };
+export const InboxScopedKey: Story = { name: "Inbox-only key · Explain the locked address",
+  parameters: { agentmailScenario: { scopedKey: true } }, play: async context => {
+    await chooseAgent(context);
+    const canvas = within(context.canvasElement);
+    await userEvent.click(canvas.getByRole("button", { name: "Continue" }));
+    await expect(await canvas.findByText(/This API key can only use support@agentmail.to/)).toBeVisible();
+    await expect(canvas.getByLabelText("Ralph’s email address")).toBeDisabled();
+  } };
+export const SwitchScopedAccount: Story = { name: "Inbox-only key · Switch to an editable address",
+  parameters: { agentmailScenario: { scopedKey: true } }, play: async context => {
+    await InboxScopedKey.play!(context);
+    const canvas = within(context.canvasElement);
+    await userEvent.click(canvas.getByRole("button", { name: "Change AgentMail account" }));
+    const page = within(context.canvasElement.ownerDocument.body);
+    await userEvent.selectOptions(await page.findByLabelText("AgentMail account"), OTHER_ACCOUNT);
+    await userEvent.click(page.getByRole("button", { name: "Use this account" }));
+    await waitFor(() => expect(canvas.getByLabelText("Email domain")).toHaveValue("paperclip.example"));
+    await userEvent.clear(canvas.getByLabelText("Ralph’s email address"));
+    await userEvent.type(canvas.getByLabelText("Ralph’s email address"), "ralph-mail");
+    await expect(canvas.getByLabelText("Ralph’s email address")).toHaveValue("ralph-mail");
+  } };
 export const AdvancedOptions: Story = { name: "Advanced · Email settings", play: async context => {
   await chooseAddress(context);
   await userEvent.click(within(context.canvasElement).getByText("Advanced options"));

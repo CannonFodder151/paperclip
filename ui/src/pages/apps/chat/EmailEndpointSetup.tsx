@@ -40,6 +40,7 @@ import {
   lowTrustBoundaryHasScope,
 } from "@/lib/trust-policy-ui";
 import { queryKeys } from "@/lib/queryKeys";
+import { formatDateTime } from "@/lib/utils";
 import type {
   AgentPermissions,
   EmailEndpointSummary,
@@ -90,7 +91,7 @@ function EmailEndpointSetupForm({ companyId }: { companyId: string }) {
   const [step, setStep] = useState<0 | 1 | 2>(draft.step ?? 0);
   const [agentId, setAgentId] = useState(draft.agentId ?? params.get("agentId") ?? "");
   const [apiKey, setApiKey] = useState("");
-  const [requestId] = useState(() => draft.requestId ?? crypto.randomUUID());
+  const [requestId, setRequestId] = useState(() => draft.requestId ?? crypto.randomUUID());
   const [addressMode, setAddressMode] = useState<"new" | "existing">(draft.addressMode ?? "new");
   const [inboxId, setInboxId] = useState(draft.inboxId ?? "");
   const [username, setUsername] = useState(draft.username ?? "");
@@ -99,6 +100,10 @@ function EmailEndpointSetupForm({ companyId }: { companyId: string }) {
   const [takenAddresses, setTakenAddresses] = useState<string[]>(draft.takenAddresses ?? []);
   const [mode, setMode] = useState<"websocket" | "webhook">(draft.mode ?? "websocket");
   const [trustOpen, setTrustOpen] = useState(false);
+  const [accountOpen, setAccountOpen] = useState(false);
+  const [replacementConnectionId, setReplacementConnectionId] = useState("");
+  const [replacementKey, setReplacementKey] = useState("");
+  const [replacementRequestId, setReplacementRequestId] = useState(() => crypto.randomUUID());
   const [permissions, setPermissions] = useState<Partial<AgentPermissions>>({});
   const suggestedUsername = useRef(false);
   useEffect(() => {
@@ -165,6 +170,44 @@ function EmailEndpointSetupForm({ companyId }: { companyId: string }) {
 
     },
     onSuccess: () => setStep(1),
+  });
+  const savedAccounts = useQuery({
+    queryKey: queryKeys.tools.connections(companyId),
+    queryFn: () => toolsApi.listConnections(companyId),
+    enabled: accountOpen,
+  });
+  const otherAccounts = savedAccounts.data?.connections.filter(connection =>
+    connection.id !== connectionId && connection.status === "active" && connection.enabled
+    && connection.config?.provider === "agentmail" && connection.config.emailCredential);
+  const changeAccount = useMutation({
+    mutationFn: async () => {
+      if (pendingEndpoint) throw new Error("Finish connecting the reserved address before changing accounts.");
+      if (replacementConnectionId) {
+        // Verify this user can use the saved credential before switching drafts.
+        await emailApi.inspectSaved(companyId, replacementConnectionId);
+        return replacementConnectionId;
+      }
+      const connection = await emailApi.connect(companyId, {
+        apiKey: replacementKey.trim(), grantKind: "organization", allAgents: false,
+        agentIds: [agentId], idempotencyKey: replacementRequestId,
+      });
+      return connection.id;
+    },
+    onSuccess: id => {
+      setConnectionId(id);
+      // A different key needs a new setup identity; reusing the old one would
+      // return the original credential from the connection idempotency lookup.
+      setRequestId(replacementRequestId);
+      setAddressMode("new");
+      setInboxId("");
+      setDomain("agentmail.to");
+      setDomainSelected(false);
+      setTakenAddresses([]);
+      setReplacementKey("");
+      setAccountOpen(false);
+      setup.reset();
+      void cache.invalidateQueries({ queryKey: queryKeys.tools.connections(companyId) });
+    },
   });
   const agentDetail = useQuery({ queryKey: queryKeys.agents.detail(agentId),
     queryFn: () => agentsApi.get(agentId), enabled: !!agentId && trustOpen });
@@ -278,6 +321,14 @@ function EmailEndpointSetupForm({ companyId }: { companyId: string }) {
           })}
         </select>}
         {pendingAddress && <p className="text-sm text-muted-foreground">This address is reserved for {chosen?.name}. Continue to finish connecting it.</p>}
+        {scopedKey && !pendingEndpoint && <div className="space-y-2 text-sm">
+          <p className="text-muted-foreground">This API key can only use {inboxId}. To type a new address or choose a domain, use an account API key.</p>
+          <Button type="button" variant="link" size="sm" className="h-auto p-0" disabled={busy || !identityReady}
+            onClick={() => {
+              setReplacementConnectionId(""); setReplacementKey("");
+              setReplacementRequestId(crypto.randomUUID()); changeAccount.reset(); setAccountOpen(true);
+            }}>Change AgentMail account</Button>
+        </div>}
         {addressError && <p id="email-address-error" role="alert" className="text-sm text-destructive">{addressError}</p>}
         {checkingNewAddress && !addressError && <p id="email-address-status" role="status" className="text-sm text-muted-foreground">
           {addressCheck.checking ? "Checking address…" : addressCheck.error ? `Could not check this address. ${addressCheck.error}`
@@ -329,6 +380,42 @@ function EmailEndpointSetupForm({ companyId }: { companyId: string }) {
         <Button variant="ghost" onClick={leave}>Email settings</Button><Button onClick={leave}>Done</Button>
       </div>
     </div>}
+      <Dialog open={accountOpen} onOpenChange={open => {
+        if (!changeAccount.isPending) { setAccountOpen(open); if (!open) setReplacementKey(""); }
+      }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Change AgentMail account</DialogTitle>
+            <DialogDescription>Choose a saved account or enter an account API key to create an email address.</DialogDescription>
+          </DialogHeader>
+          <form className="space-y-6" onSubmit={event => {
+            event.preventDefault();
+            if (!changeAccount.isPending && !pendingEndpoint && (replacementConnectionId || replacementKey.trim())) changeAccount.mutate();
+          }}>
+            {!!otherAccounts?.length && <div className="space-y-2">
+              <Label htmlFor="email-account">AgentMail account</Label>
+              <select id="email-account" className={selectClass} value={replacementConnectionId} disabled={changeAccount.isPending}
+                onChange={event => { setReplacementConnectionId(event.target.value); setReplacementKey(""); changeAccount.reset(); }}>
+                <option value="">Enter another API key</option>
+                {otherAccounts.map(connection => <option key={connection.id} value={connection.id}>
+                  {connection.name} · saved {formatDateTime(connection.createdAt)}
+                </option>)}
+              </select>
+            </div>}
+            {savedAccounts.isFetching && <p role="status" className="text-sm text-muted-foreground">Loading saved accounts…</p>}
+            {savedAccounts.isError && <p role="alert" className="text-sm text-destructive">Could not load saved accounts. {savedAccounts.error.message}</p>}
+            {!replacementConnectionId && <AgentMailApiKeyField value={replacementKey} disabled={changeAccount.isPending}
+              onChange={value => { setReplacementKey(value); changeAccount.reset(); }} />}
+            {changeAccount.error && <p role="alert" className="text-sm text-destructive">{changeAccount.error.message}</p>}
+            <div className="flex items-center justify-between gap-3 border-t border-border pt-5">
+              <Button type="button" variant="ghost" disabled={changeAccount.isPending} onClick={() => { setAccountOpen(false); setReplacementKey(""); }}>Cancel</Button>
+              <Button disabled={changeAccount.isPending || !!pendingEndpoint || !(replacementConnectionId || replacementKey.trim())}>
+                {changeAccount.isPending ? "Connecting…" : "Use this account"}
+              </Button>
+            </div>
+          </form>
+        </DialogContent>
+      </Dialog>
       <Dialog open={trustOpen} onOpenChange={setTrustOpen}>
         <DialogContent className="max-h-screen overflow-y-auto sm:max-w-2xl">
           <DialogHeader>

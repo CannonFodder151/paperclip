@@ -7,12 +7,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "@/api/client";
 import { EmailEndpointSetup } from "./EmailEndpointSetup";
 
-const mocks = vi.hoisted(() => ({ companyId: "company" as string | null, listAgents: vi.fn(), connect: vi.fn(), inspect: vi.fn(), checkAddress: vi.fn(), setup: vi.fn(), listInboxes: vi.fn(), putInstalls: vi.fn() }));
+const mocks = vi.hoisted(() => ({ companyId: "company" as string | null, listAgents: vi.fn(), connect: vi.fn(), inspect: vi.fn(), checkAddress: vi.fn(), setup: vi.fn(), listInboxes: vi.fn(), listConnections: vi.fn(), putInstalls: vi.fn() }));
 vi.mock("@/lib/router", async () => import("react-router-dom"));
 vi.mock("@/context/CompanyContext", () => ({ useCompany: () => ({ selectedCompanyId: mocks.companyId }) }));
 vi.mock("@/components/chat/ChatSetupNavigation", () => ({ ChatSetupNavigation: () => null }));
 vi.mock("@/api/agents", () => ({ agentsApi: { list: mocks.listAgents } }));
-vi.mock("@/api/tools", () => ({ toolsApi: { putConnectionInstalls: mocks.putInstalls } }));
+vi.mock("@/api/tools", () => ({ toolsApi: { putConnectionInstalls: mocks.putInstalls, listConnections: mocks.listConnections } }));
 vi.mock("@/api/email", () => ({ emailApi: { connect: mocks.connect, inspectSaved: mocks.inspect, checkAddress: mocks.checkAddress, setup: mocks.setup, list: mocks.listInboxes } }));
 
 let container: HTMLDivElement;
@@ -27,6 +27,7 @@ beforeEach(() => {
   mocks.inspect.mockResolvedValue({ scope: { scope_type: "organization" }, inboxes: [], domains: [] });
   mocks.checkAddress.mockImplementation(async (_company, _connection, { username, domain }) => ({ address: `${username}@${domain}`, status: "unknown" }));
   mocks.listInboxes.mockResolvedValue([]);
+  mocks.listConnections.mockResolvedValue({ connections: [] });
   mocks.connect.mockResolvedValue({ id: "account" });
   mocks.setup.mockResolvedValue({ address: "ralph-team@agentmail.to", connectionId: "inbox" });
   container = document.createElement("div");
@@ -48,7 +49,7 @@ async function mount(saved = true, waitForCompany = true, agentId = "ralph") {
   if (waitForCompany) await vi.waitFor(() => expect(container.textContent).toContain(agentId === "support" ? "Support" : "Ralph"));
 }
 function button(name: string) {
-  const value = [...container.querySelectorAll("button")].find(button => button.textContent?.trim() === name);
+  const value = [...document.querySelectorAll("button")].find(button => button.textContent?.trim() === name);
   expect(value).toBeDefined();
   return value!;
 }
@@ -58,7 +59,7 @@ async function click(name: string) {
 }
 async function fill(selector: string, value: string) {
   await act(async () => {
-    const input = container.querySelector<HTMLInputElement>(selector)!;
+    const input = document.querySelector<HTMLInputElement>(selector)!;
     expect(input).not.toBeNull();
     Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, value);
     input.dispatchEvent(new Event("input", { bubbles: true }));
@@ -66,6 +67,73 @@ async function fill(selector: string, value: string) {
 }
 
 describe("AgentMail two-step setup", () => {
+  it("explains an inbox-only key and switches to a saved account with editable name and domain", async () => {
+    mocks.inspect.mockImplementation(async (_company, id) => id === "account"
+      ? { scope: { scope_type: "inbox" }, inboxes: [{ inbox_id: "locked@agentmail.to" }], domains: [] }
+      : { scope: { scope_type: "organization" }, inboxes: [], domains: [{ domain: "paperclip.example", status: "VERIFIED" }] });
+    mocks.listConnections.mockResolvedValue({ connections: [{
+      id: "organization-account", name: "AgentMail", status: "active", enabled: true,
+      config: { provider: "agentmail", emailCredential: true }, createdAt: "2026-09-30T14:00:00Z",
+    }] });
+    await mount();
+    await click("Continue");
+    await vi.waitFor(() => expect(container.textContent).toContain("This API key can only use locked@agentmail.to"));
+    expect(container.querySelector<HTMLSelectElement>("#email-existing")?.disabled).toBe(true);
+    expect(container.querySelector("#email-name")).toBeNull();
+    await click("Change AgentMail account");
+    await vi.waitFor(() => expect(document.querySelector("#email-account")).not.toBeNull());
+    await act(async () => {
+      const select = document.querySelector<HTMLSelectElement>("#email-account")!;
+      select.value = "organization-account";
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    await click("Use this account");
+    await vi.waitFor(() => expect(container.querySelector<HTMLSelectElement>("#email-domain")?.value).toBe("paperclip.example"));
+    await fill("#email-name", "ralph-mail");
+    await act(async () => {
+      const select = container.querySelector<HTMLSelectElement>("#email-domain")!;
+      expect(select.disabled).toBe(false);
+      select.value = "agentmail.to";
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    await click("Create email address");
+    await vi.waitFor(() => expect(mocks.setup).toHaveBeenCalledWith("company", expect.objectContaining({
+      credentialConnectionId: "organization-account", assignedAgentId: "ralph", username: "ralph-mail", domain: "agentmail.to",
+    })));
+    expect(mocks.setup.mock.calls[0][1].inboxId).toBeUndefined();
+    expect(mocks.connect).not.toHaveBeenCalled();
+    expect(mocks.putInstalls).not.toHaveBeenCalled();
+  });
+
+  it("replaces an inbox-only key with a fresh idempotency key without storing the secret", async () => {
+    const originalRequestId = crypto.randomUUID();
+    const draftKey = "paperclip.agentmail-setup:company:account:ralph";
+    sessionStorage.setItem(draftKey, JSON.stringify({ connectionId: "account", agentId: "ralph", step: 1, requestId: originalRequestId }));
+    mocks.inspect.mockImplementation(async (_company, id) => ({
+      scope: { scope_type: id === "account" ? "inbox" : "organization" },
+      inboxes: [{ inbox_id: "locked@agentmail.to" }], domains: [],
+    }));
+    mocks.connect.mockResolvedValue({ id: "replacement-account" });
+    await mount();
+    await vi.waitFor(() => expect(container.textContent).toContain("This API key can only use"));
+    await click("Change AgentMail account");
+    await fill('input[type="password"]', "replacement-secret");
+    expect(sessionStorage.getItem(draftKey)).not.toContain("replacement-secret");
+    await click("Use this account");
+    await vi.waitFor(() => expect(container.querySelector("#email-name")).not.toBeNull());
+    const replacementRequest = mocks.connect.mock.calls[0][1];
+    expect(replacementRequest).toMatchObject({ apiKey: "replacement-secret", agentIds: ["ralph"], grantKind: "organization", allAgents: false });
+    expect(replacementRequest.idempotencyKey).not.toBe(originalRequestId);
+    await act(async () => root.unmount());
+    client.clear(); root = createRoot(container);
+    await mount();
+    await click("Create email address");
+    await vi.waitFor(() => expect(mocks.setup).toHaveBeenCalledWith("company", expect.objectContaining({
+      credentialConnectionId: "replacement-account", idempotencyKey: replacementRequest.idempotencyKey, username: "ralph",
+    })));
+    expect(mocks.connect).toHaveBeenCalledTimes(1);
+  });
+
   it("checks the initial address and debounces edits while ignoring stale responses", async () => {
     await mount();
     vi.useFakeTimers();

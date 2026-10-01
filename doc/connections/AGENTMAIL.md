@@ -25,6 +25,12 @@ key. An existing inbox-scoped key can connect only its own inbox. Credentials
 are vaulted and resolved by the server; they are not passed to agents. An inbox
 can have only one non-archived Paperclip endpoint across the instance.
 
+For an inbox-scoped key, setup explains why the address cannot be edited and
+offers **Change AgentMail account**. The operator can select another saved
+account or enter an account API key. Switching returns to editable email-name
+and domain fields, preserves the selected agent, and starts a new setup request.
+An already allocated inbox must finish its original setup before changing accounts.
+
 Verified custom domains are selectable after checking the API key. Complete DNS
 setup in [AgentMail](https://docs.agentmail.to/custom-domains). Paperclip does not
 register domains or manage DNS.
