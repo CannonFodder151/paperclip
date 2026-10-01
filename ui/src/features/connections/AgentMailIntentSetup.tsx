@@ -35,9 +35,10 @@ export function AgentMailIntentSetup({ companyId, agentId, requestId, savedCrede
   const [setupRequestId, setSetupRequestId] = useState(draft?.setupRequestId ?? requestId);
   const [apiKey, setApiKey] = useState("");
   // A refresh can interrupt the response after the server has saved the key.
-  // Recover that account unless the user deliberately started a different setup.
+  // Recover that account unless the user selected another key or started a
+  // different setup after the interrupted request.
   const [credentialId, setCredentialId] = useState(draft?.credentialId
-    ?? (!draft || draft.setupRequestId === requestId ? savedCredentialId ?? null : null));
+    ?? (!draft || (draft.setupRequestId === requestId && !draft.selectedCredentialId) ? savedCredentialId ?? null : null));
   const [selectedCredentialId, setSelectedCredentialId] = useState<string | null>(draft?.selectedCredentialId ?? null);
   const [inboxConnectionId, setInboxConnectionId] = useState(readyConnectionId ?? draft?.inboxConnectionId ?? null);
   useEffect(() => {
@@ -45,8 +46,8 @@ export function AgentMailIntentSetup({ companyId, agentId, requestId, savedCrede
     catch { /* Keep setup usable without browser storage. */ }
   }, [draftKey, setupRequestId, credentialId, inboxConnectionId, selectedCredentialId]);
   const changeKey = useMutation({
-    mutationFn: async () => {
-      const pending = (await emailApi.list(companyId)).find(inbox => inbox.id === setupRequestId && inbox.status !== "archived");
+    mutationFn: async (pendingRequestId: string) => {
+      const pending = (await emailApi.list(companyId)).find(inbox => inbox.id === pendingRequestId && inbox.status !== "archived");
       if (pending?.address) throw new Error(`The address ${pending.address} is already reserved. Finish setup with its saved key.`);
       if (pending) await emailApi.control(pending.id, "remove");
     },
@@ -59,14 +60,14 @@ export function AgentMailIntentSetup({ companyId, agentId, requestId, savedCrede
     },
   });
   const setup = useMutation({
-    mutationFn: async () => {
-      let connectionId = inboxConnectionId;
+    mutationFn: async (submitted: { accountId: string | null; apiKey: string; requestId: string; inboxId: string | null }) => {
+      let connectionId = submitted.inboxId;
       if (!connectionId) {
-        let accountId = credentialId || selectedCredentialId;
+        let accountId = submitted.accountId;
         if (!accountId) {
           const account = await emailApi.connect(companyId, {
-            apiKey: apiKey.trim(), grantKind: "organization", allAgents: false,
-            agentIds: [agentId], idempotencyKey: setupRequestId,
+            apiKey: submitted.apiKey, grantKind: "organization", allAgents: false,
+            agentIds: [agentId], idempotencyKey: submitted.requestId,
           });
           accountId = account.id;
           setCredentialId(accountId);
@@ -75,7 +76,7 @@ export function AgentMailIntentSetup({ companyId, agentId, requestId, savedCrede
         setCredentialId(accountId);
         const inbox = await emailApi.setup(companyId, {
           assignedAgentId: agentId, credentialConnectionId: accountId,
-          receiveMode: "websocket", idempotencyKey: setupRequestId,
+          receiveMode: "websocket", idempotencyKey: submitted.requestId,
         });
         connectionId = inbox.connectionId;
         setInboxConnectionId(connectionId);
@@ -88,7 +89,10 @@ export function AgentMailIntentSetup({ companyId, agentId, requestId, savedCrede
   });
   return <form className="mt-4 space-y-4" data-testid="agentmail-inline-setup" onSubmit={event => {
     event.preventDefault();
-    if (!setup.isPending && !changeKey.isPending && !declining) setup.mutate();
+    const accountId = credentialId || selectedCredentialId;
+    if (!setup.isPending && !changeKey.isPending && !declining && (accountId || inboxConnectionId || apiKey.trim())) {
+      setup.mutate({ accountId, apiKey: apiKey.trim(), requestId: setupRequestId, inboxId: inboxConnectionId });
+    }
   }}>
     {credentialId || inboxConnectionId
       ? <p className="text-sm text-muted-foreground">{inboxConnectionId ? "Your inbox is ready. Continue to resume the chat." : "API key saved. Finish creating the inbox."}</p>
@@ -96,7 +100,7 @@ export function AgentMailIntentSetup({ companyId, agentId, requestId, savedCrede
           onConnectionChange={id => { setSelectedCredentialId(id); setApiKey(""); }}
           value={apiKey} onChange={setApiKey} disabled={setup.isPending || changeKey.isPending || declining} />}
     {credentialId && !inboxConnectionId && <Button type="button" variant="link" size="sm" className="h-auto p-0"
-      disabled={setup.isPending || changeKey.isPending || declining} onClick={() => changeKey.mutate()}>
+      disabled={setup.isPending || changeKey.isPending || declining} onClick={() => changeKey.mutate(setupRequestId)}>
       {changeKey.isPending ? "Checking setup…" : "Change API key"}
     </Button>}
     {changeKey.error && <p className="text-sm text-destructive" role="alert">{changeKey.error.message}</p>}

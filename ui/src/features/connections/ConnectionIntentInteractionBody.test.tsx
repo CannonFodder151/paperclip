@@ -126,12 +126,12 @@ async function flush() {
 async function waitForAssertion(assertion: () => void, attempts = 20) {
   let lastError: unknown;
   for (let attempt = 0; attempt < attempts; attempt += 1) {
+    await flush();
     try {
       assertion();
       return;
     } catch (error) {
       lastError = error;
-      await flush();
     }
   }
   throw lastError;
@@ -215,6 +215,8 @@ beforeEach(() => {
 
 afterEach(async () => {
   if (root) await act(() => root?.unmount());
+  await queryClient.cancelQueries();
+  queryClient.clear();
   host?.remove();
   document.body
     .querySelectorAll("[data-radix-focus-guard]")
@@ -607,6 +609,7 @@ describe("AgentMail inline setup", () => {
     payload: { ...pendingConnectionIntentInteraction.payload, purpose: "channel", serviceSlug: "agentmail", serviceName: "AgentMail" },
   };
   async function enterKey() {
+    await waitForAssertion(() => expect(document.querySelector('input[type="password"]')).not.toBeNull());
     const input = document.querySelector('input[type="password"]') as HTMLInputElement;
     await act(() => {
       Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, "fixture-api-key");
@@ -662,6 +665,8 @@ describe("AgentMail inline setup", () => {
     emailListMock.mockResolvedValue([{ id: interaction.id, address: null, status: "draft" }]);
     renderBody(interaction); await flush();
     await waitForAssertion(() => expect(button("Connect AgentMail")?.disabled).toBe(false));
+    expect((document.querySelector("select") as HTMLSelectElement)?.value).toBe("saved-account");
+    expect(emailConnectMock).not.toHaveBeenCalled();
     await act(() => button("Connect AgentMail")!.click()); await flush();
     expect(emailConnectMock).not.toHaveBeenCalled();
     await act(() => button("Change API key")!.click()); await flush();
@@ -700,6 +705,21 @@ describe("AgentMail inline setup", () => {
     expect(emailConnectMock).not.toHaveBeenCalled();
     expect(emailSetupMock).toHaveBeenCalledWith(interaction.companyId, expect.objectContaining({
       credentialConnectionId: "server-saved-account", idempotencyKey: resumedInteraction.id,
+    }));
+  });
+  it("keeps a different saved-key selection when recovering an interrupted save", async () => {
+    const resumedInteraction = { ...interaction, id: "a381e91e-7127-427d-9d2d-519d4deba89f" };
+    sessionStorage.setItem(`paperclip.agentmail-inline:${interaction.companyId}:${resumedInteraction.id}`, JSON.stringify({
+      setupRequestId: resumedInteraction.id, credentialId: null, inboxConnectionId: null, selectedCredentialId: "selected-account",
+    }));
+    emailCredentialsMock.mockResolvedValue([{ id: "selected-account", label: "My selected key", scope: "organization", createdAt: "2026-10-01T14:00:00Z" }]);
+    setupOptionsMock.mockResolvedValue({ existingConnections: [], emailSetup: { credentialConnectionId: "earlier-account", readyConnectionId: null } });
+    renderBody(resumedInteraction); await flush();
+    await waitForAssertion(() => expect((document.querySelector('select') as HTMLSelectElement)?.value).toBe("selected-account"));
+    await act(() => button("Connect AgentMail")!.click()); await flush();
+    expect(emailConnectMock).not.toHaveBeenCalled();
+    expect(emailSetupMock).toHaveBeenCalledWith(interaction.companyId, expect.objectContaining({
+      credentialConnectionId: "selected-account", idempotencyKey: resumedInteraction.id,
     }));
   });
   it("does not restore an abandoned server account after the user changes keys", async () => {
