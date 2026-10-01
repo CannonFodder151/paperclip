@@ -43,7 +43,7 @@ afterEach(async () => {
   vi.unstubAllGlobals();
   vi.useRealTimers();
 });
-function Location() { return <output data-testid="location">{useLocation().pathname}</output>; }
+function Location() { const location = useLocation(); return <output data-testid="location" data-search={location.search}>{location.pathname}</output>; }
 async function mount(saved = true, waitForCompany = true, agentId = "ralph", search = "") {
   client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
   await act(async () => root.render(<QueryClientProvider client={client}><MemoryRouter initialEntries={[
@@ -112,6 +112,21 @@ describe("AgentMail two-step setup", () => {
     expect(button("Create email address").disabled).toBe(true);
     expect(mocks.connect).not.toHaveBeenCalled();
     expect(mocks.setup).not.toHaveBeenCalled();
+  });
+
+  it("honors Finish setup when an older client saved a replacement under the original resume key", async () => {
+    const requestId = crypto.randomUUID();
+    sessionStorage.setItem(`paperclip.agentmail-setup:company:${requestId}:ralph`, JSON.stringify({
+      connectionId: "wrong-account", agentId: "someone-else", requestId: crypto.randomUUID(), username: "replacement",
+    }));
+    mocks.listInboxes.mockResolvedValue([{ id: requestId, connectionId: "original-inbox", assignedAgentId: "ralph", address: "original@agentmail.to", status: "draft", receiveMode: "websocket" }]);
+    mocks.getConnection.mockResolvedValue({ config: { credentialConnectionId: "original-account" } });
+    await mount(false, true, "ralph", `&resume=${requestId}`);
+    await vi.waitFor(() => expect(button("Finish connecting").disabled).toBe(false));
+    await click("Finish connecting");
+    expect(mocks.setup).toHaveBeenLastCalledWith("company", expect.objectContaining({
+      credentialConnectionId: "original-account", inboxId: "original@agentmail.to", assignedAgentId: "ralph", idempotencyKey: requestId,
+    }));
   });
 
   it("returns Cancel to Connectors rather than the credential permissions page", async () => {
@@ -505,28 +520,39 @@ describe("AgentMail two-step setup", () => {
 
   it("lets a failed setup choose another address without deleting or reusing its allocated inbox", async () => {
     const requestId = crypto.randomUUID();
-    const draftKey = "paperclip.agentmail-setup:company:account:ralph";
+    const draftKey = `paperclip.agentmail-setup:company:${requestId}:ralph`;
     sessionStorage.setItem(draftKey, JSON.stringify({ connectionId: "account", agentId: "ralph", step: 1, requestId }));
     mocks.listInboxes.mockResolvedValue([{ id: requestId, assignedAgentId: "ralph", address: "reserved@paperclip.example", status: "draft" }]);
     mocks.inspect.mockResolvedValue({ scope: { scope_type: "organization" }, inboxes: [{ inbox_id: "reserved@paperclip.example" }], domains: [{ domain_id: "custom", domain: "paperclip.example", status: "VERIFIED" }] });
-    await mount();
+    await mount(true, true, "ralph", `&resume=${requestId}`);
     await vi.waitFor(() => expect(button("Finish connecting").disabled).toBe(false));
     await click("Choose a different address");
     expect(container.querySelector<HTMLInputElement>("#email-name")?.readOnly).toBe(false);
     expect(container.querySelector<HTMLSelectElement>("#email-domain")?.disabled).toBe(false);
     expect(container.querySelector<HTMLSelectElement>("#email-domain")?.value).toBe("paperclip.example");
     await fill("#email-name", "another-address");
-    const nextRequestId = JSON.parse(sessionStorage.getItem(draftKey)!).requestId;
+    const nextSearch = container.querySelector('[data-testid="location"]')!.getAttribute("data-search")!;
+    const nextRequestId = new URLSearchParams(nextSearch).get("setupId")!;
     expect(nextRequestId).not.toBe(requestId);
+    expect(JSON.parse(sessionStorage.getItem(draftKey)!).requestId).toBe(requestId);
     await act(async () => root.unmount());
     client.clear();
     root = createRoot(container);
-    await mount();
+    await mount(true, true, "ralph", `&setupId=${nextRequestId}`);
     await click("Create email address");
     expect(mocks.setup).toHaveBeenLastCalledWith("company", expect.objectContaining({
       username: "another-address", domain: "paperclip.example", idempotencyKey: nextRequestId,
     }));
     expect(mocks.control).not.toHaveBeenCalled();
+    await act(async () => root.unmount());
+    client.clear();
+    root = createRoot(container);
+    await mount(true, true, "ralph", `&resume=${requestId}`);
+    await vi.waitFor(() => expect(button("Finish connecting").disabled).toBe(false));
+    await click("Finish connecting");
+    expect(mocks.setup).toHaveBeenLastCalledWith("company", expect.objectContaining({
+      inboxId: "reserved@paperclip.example", idempotencyKey: requestId,
+    }));
   });
 
   it("does not treat another setup's allocated address as its own retry", async () => {

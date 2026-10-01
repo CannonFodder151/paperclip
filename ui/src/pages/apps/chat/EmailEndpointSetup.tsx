@@ -91,7 +91,12 @@ function EmailEndpointSetupForm({ companyId }: { companyId: string }) {
   const resumeId = params.get("resume");
   const setupId = params.get("setupId");
   const draftKey = `paperclip.agentmail-setup:${companyId}:${resumeId ?? setupId ?? params.get("connectionId") ?? "new"}:${params.get("agentId") ?? "choose"}`;
-  const [draft] = useState(() => readEmailSetupDraft(draftKey));
+  const [draft] = useState(() => {
+    const saved = readEmailSetupDraft(draftKey);
+    // A Finish setup link always names its original inbox, including when an
+    // older client accidentally stored a replacement under that resume key.
+    return resumeId && saved.requestId && saved.requestId !== resumeId ? {} : saved;
+  });
   const [connectionId, setConnectionId] = useState(draft.connectionId ?? params.get("connectionId") ?? "");
   const [step, setStep] = useState<0 | 1 | 2>(draft.step ?? (resumeId ? 1 : 0));
   const [agentId, setAgentId] = useState(draft.agentId ?? params.get("agentId") ?? "");
@@ -289,14 +294,17 @@ function EmailEndpointSetupForm({ companyId }: { companyId: string }) {
   const chooseAnotherAddress = () => {
     // Preserve the allocated inbox and its resumable setup. A different address
     // must use a new provider client_id, never silently rename a retry.
-    setRequestId(crypto.randomUUID());
-    setAddressMode("new");
-    setUsername("");
-    setInboxId("");
-    setDomainSelected(true);
-    if (pendingAddress) setDomain(pendingAddress.slice(pendingAddress.lastIndexOf("@") + 1));
-    setup.reset();
-    connect.reset();
+    const nextRequestId = crypto.randomUUID();
+    const nextDraft: EmailSetupDraft = {
+      connectionId, selectedCredentialId: connectionId, agentId, step: 1,
+      requestId: nextRequestId, addressMode: "new", username: "", inboxId: "",
+      domain: pendingAddress?.slice(pendingAddress.lastIndexOf("@") + 1) ?? domain,
+      domainSelected: true, takenAddresses, mode, allowInboxKey: false,
+    };
+    try {
+      sessionStorage.setItem(`paperclip.agentmail-setup:${companyId}:${nextRequestId}:${agentId}`, JSON.stringify(nextDraft));
+    } catch { /* The new link still restores the agent and saved account. */ }
+    navigate(`/apps/chat/connect?${new URLSearchParams({ provider: "agentmail", purpose: "chat", setupId: nextRequestId, agentId, connectionId })}`);
   };
   return <div className="mx-auto max-w-xl space-y-6 p-6">
     <header className="space-y-2">
