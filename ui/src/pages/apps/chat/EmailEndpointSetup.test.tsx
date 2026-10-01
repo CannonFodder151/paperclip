@@ -7,13 +7,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "@/api/client";
 import { EmailEndpointSetup } from "./EmailEndpointSetup";
 
-const mocks = vi.hoisted(() => ({ companyId: "company" as string | null, listAgents: vi.fn(), connect: vi.fn(), inspect: vi.fn(), setup: vi.fn(), listInboxes: vi.fn(), putInstalls: vi.fn() }));
+const mocks = vi.hoisted(() => ({ companyId: "company" as string | null, listAgents: vi.fn(), connect: vi.fn(), inspect: vi.fn(), checkAddress: vi.fn(), setup: vi.fn(), listInboxes: vi.fn(), putInstalls: vi.fn() }));
 vi.mock("@/lib/router", async () => import("react-router-dom"));
 vi.mock("@/context/CompanyContext", () => ({ useCompany: () => ({ selectedCompanyId: mocks.companyId }) }));
 vi.mock("@/components/chat/ChatSetupNavigation", () => ({ ChatSetupNavigation: () => null }));
 vi.mock("@/api/agents", () => ({ agentsApi: { list: mocks.listAgents } }));
 vi.mock("@/api/tools", () => ({ toolsApi: { putConnectionInstalls: mocks.putInstalls } }));
-vi.mock("@/api/email", () => ({ emailApi: { connect: mocks.connect, inspectSaved: mocks.inspect, setup: mocks.setup, list: mocks.listInboxes } }));
+vi.mock("@/api/email", () => ({ emailApi: { connect: mocks.connect, inspectSaved: mocks.inspect, checkAddress: mocks.checkAddress, setup: mocks.setup, list: mocks.listInboxes } }));
 
 let container: HTMLDivElement;
 let root: Root;
@@ -25,6 +25,7 @@ beforeEach(() => {
   sessionStorage.clear();
   mocks.listAgents.mockResolvedValue([{ id: "ralph", name: "Ralph", status: "idle", permissions: {} }]);
   mocks.inspect.mockResolvedValue({ scope: { scope_type: "organization" }, inboxes: [], domains: [] });
+  mocks.checkAddress.mockImplementation(async (_company, _connection, { username, domain }) => ({ address: `${username}@${domain}`, status: "unknown" }));
   mocks.listInboxes.mockResolvedValue([]);
   mocks.connect.mockResolvedValue({ id: "account" });
   mocks.setup.mockResolvedValue({ address: "ralph-team@agentmail.to", connectionId: "inbox" });
@@ -37,6 +38,7 @@ afterEach(async () => {
   client?.clear();
   container.remove();
   vi.unstubAllGlobals();
+  vi.useRealTimers();
 });
 async function mount(saved = true, waitForCompany = true, agentId = "ralph") {
   client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
@@ -50,7 +52,10 @@ function button(name: string) {
   expect(value).toBeDefined();
   return value!;
 }
-async function click(name: string) { await act(async () => button(name).click()); }
+async function click(name: string) {
+  if (name === "Create email address") await vi.waitFor(() => expect(button(name).disabled).toBe(false));
+  await act(async () => button(name).click());
+}
 async function fill(selector: string, value: string) {
   await act(async () => {
     const input = container.querySelector<HTMLInputElement>(selector)!;
@@ -61,6 +66,79 @@ async function fill(selector: string, value: string) {
 }
 
 describe("AgentMail two-step setup", () => {
+  it("checks the initial address and debounces edits while ignoring stale responses", async () => {
+    await mount();
+    vi.useFakeTimers();
+    await click("Continue");
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    expect(container.textContent).toContain("Checking address");
+    expect(button("Create email address").disabled).toBe(true);
+    await act(async () => { await vi.advanceTimersByTimeAsync(350); });
+    expect(mocks.checkAddress).toHaveBeenLastCalledWith("company", "account", { username: "ralph", domain: "agentmail.to" }, expect.any(AbortSignal));
+    let resolveOld!: (result: unknown) => void;
+    mocks.checkAddress.mockImplementationOnce(() => new Promise(resolve => { resolveOld = resolve; }));
+    await fill("#email-name", "ralph-old");
+    await act(async () => { await vi.advanceTimersByTimeAsync(350); });
+    const oldSignal = mocks.checkAddress.mock.calls[1][3] as AbortSignal;
+    await fill("#email-name", "ralph-n");
+    await act(async () => { await vi.advanceTimersByTimeAsync(200); });
+    await fill("#email-name", "ralph-new");
+    expect(oldSignal.aborted).toBe(true);
+    await act(async () => { resolveOld({ address: "ralph-old@agentmail.to", status: "taken" }); });
+    expect(container.querySelector("#email-address-error")).toBeNull();
+    await act(async () => { await vi.advanceTimersByTimeAsync(349); });
+    expect(mocks.checkAddress).toHaveBeenCalledTimes(2);
+    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+    expect(mocks.checkAddress).toHaveBeenCalledTimes(3);
+    expect(mocks.checkAddress.mock.calls[2][2].username).toBe("ralph-new");
+    expect(container.textContent).toContain("confirms availability when you create");
+    expect(container.textContent).not.toContain("is available");
+  });
+
+  it("offers clickable alternatives for a taken initial address and checks the selection", async () => {
+    mocks.checkAddress.mockResolvedValueOnce({ address: "ralph@agentmail.to", status: "taken" });
+    await mount();
+    await click("Continue");
+    await vi.waitFor(() => expect(container.querySelector("#email-address-error")?.textContent).toContain("already in use"));
+    expect(button("Create email address").disabled).toBe(true);
+    await click("ralph-agent@agentmail.to");
+    expect(container.querySelector<HTMLInputElement>("#email-name")?.value).toBe("ralph-agent");
+    expect(container.querySelector("#email-address-error")).toBeNull();
+    await vi.waitFor(() => expect(mocks.checkAddress).toHaveBeenLastCalledWith("company", "account", { username: "ralph-agent", domain: "agentmail.to" }, expect.any(AbortSignal)));
+    expect(mocks.setup).not.toHaveBeenCalled();
+  });
+
+  it("defaults to a verified custom domain beside the name and preserves an explicit selection on reload", async () => {
+    mocks.inspect.mockResolvedValue({ scope: { scope_type: "organization" }, inboxes: [], domains: [
+      { domain_id: "pending", domain: "pending.example", status: "PENDING" },
+      { domain_id: "custom", domain: "paperclip.example", status: "VERIFIED" },
+    ] });
+    await mount();
+    await click("Continue");
+    await vi.waitFor(() => expect(container.querySelector<HTMLSelectElement>("#email-domain")?.value).toBe("paperclip.example"));
+    expect(container.querySelector("#email-domain")?.closest("details")).toBeNull();
+    expect(container.querySelector('option[value="pending.example"]')).toBeNull();
+    await act(async () => {
+      const select = container.querySelector<HTMLSelectElement>("#email-domain")!;
+      select.value = "agentmail.to";
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    await vi.waitFor(() => expect(mocks.checkAddress).toHaveBeenLastCalledWith("company", "account", { username: "ralph", domain: "agentmail.to" }, expect.any(AbortSignal)));
+    await act(async () => root.unmount());
+    client.clear();
+    root = createRoot(container);
+    await mount();
+    await vi.waitFor(() => expect(container.querySelector<HTMLSelectElement>("#email-domain")?.value).toBe("agentmail.to"));
+  });
+
+  it("shows lookup failures without mislabeling the address taken or blocking creation", async () => {
+    mocks.checkAddress.mockRejectedValue(new Error("AgentMail is rate limiting requests."));
+    await mount();
+    await click("Continue");
+    await vi.waitFor(() => expect(container.textContent).toContain("Could not check this address"));
+    expect(container.querySelector("#email-address-error")).toBeNull();
+    expect(button("Create email address").disabled).toBe(false);
+  });
   it("restores saved progress after the company loads without overwriting the draft", async () => {
     const key = "paperclip.agentmail-setup:company:account:ralph";
     const requestId = crypto.randomUUID();

@@ -7,8 +7,14 @@ import type {
   EmailThreadSummary,
   EmailSendInput,
   EmailEndpointSetupInput,
+  EmailAddressCheckInput,
+  EmailAddressCheckResult,
 } from "@paperclipai/shared";
 export const emailApi = {
+  checkAddress: (companyId: string, connectionId: string, input: EmailAddressCheckInput, signal?: AbortSignal) =>
+    api.post<EmailAddressCheckResult>(
+      `/companies/${companyId}/email/connections/${connectionId}/check-address`, input, { signal },
+    ),
   connect: (companyId: string, input: EmailConnectionInput) =>
     api.post<ToolConnection>(
       `/companies/${companyId}/email/connections`,

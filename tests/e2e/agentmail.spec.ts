@@ -88,6 +88,10 @@ test("AgentMail setup and email work through the normal task conversation", asyn
   await page.route("**/api/**/email/**", async (route) => {
     const url = new URL(route.request().url()),
       method = route.request().method();
+    if (url.pathname.endsWith("/check-address")) {
+      const body = route.request().postDataJSON();
+      return fulfill(route, { address: `${body.username}@${body.domain}`, status: body.username === "taken" ? "taken" : "unknown" });
+    }
     if (url.pathname.endsWith("/inspect"))
       return fulfill(route, {
         scope: { scope_type: "organization" },
@@ -155,9 +159,17 @@ test("AgentMail setup and email work through the normal task conversation", asyn
   await page.getByRole("button", { name: "Continue", exact: true }).click();
   const addressField = page.getByLabel("Mail agent’s email address", { exact: true });
   await expect(addressField).toHaveValue("mail-agent");
+  await expect(page.getByLabel("Email domain", { exact: true })).toHaveValue("verified.example.test");
+  await addressField.fill("taken");
+  await expect(page.getByRole("alert")).toHaveText(addressTakenError);
+  expect(setupRequests).toHaveLength(0);
+  await page.getByRole("button", { name: "taken-agent@verified.example.test", exact: true }).click();
+  await expect(addressField).toHaveValue("taken-agent");
+  await expect(page.getByRole("alert")).toHaveCount(0);
+  await addressField.fill("mail-agent");
   await expect(page.getByRole("button", { name: "Review email address" })).toHaveCount(0);
   await page.getByText("Advanced options", { exact: true }).click();
-  await expect(page.getByLabel("Domain", { exact: true }).locator("option", { hasText: "verified.example.test" })).toHaveCount(1);
+  await expect(page.getByLabel("Email domain", { exact: true }).locator("option", { hasText: "verified.example.test" })).toHaveCount(1);
   await page.getByRole("button", { name: "Review trust settings" }).click();
   const trustDialog = page.getByRole("dialog");
   await trustDialog.getByRole("combobox").first().selectOption("low_trust_review");

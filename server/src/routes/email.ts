@@ -2,6 +2,7 @@ import { Router, type ErrorRequestHandler, type Request } from "express";
 import { z } from "zod";
 import {
   emailConnectionSchema,
+  emailAddressCheckSchema,
   emailEndpointSetupSchema,
   emailSendSchema,
   isUuidLike,
@@ -12,7 +13,7 @@ import { assertBoard, assertCompanyAccess, hasCompanyAccess } from "./authz.js";
 import { emailConnectionService } from "../services/email-connections.js";
 import { accessService } from "../services/access.js";
 import { badRequest, forbidden, HttpError, notFound } from "../errors.js";
-import { AgentmailApiError } from "../services/agentmail-api.js";
+import { agentmailApi, AgentmailApiError } from "../services/agentmail-api.js";
 import type {
   EmailChannelService,
   EmailActor,
@@ -131,6 +132,20 @@ export function emailRoutes(db: Db, service: EmailChannelService) {
       res
         .set("Cache-Control", "no-store")
         .json(await service.inspect(saved.value));
+    },
+  );
+  router.post(
+    "/companies/:companyId/email/connections/:connectionId/check-address",
+    validate(emailAddressCheckSchema),
+    async (req, res) => {
+      const companyId = req.params.companyId as string;
+      await manager(req, companyId);
+      await service.requireEnabled();
+      const saved = await emailConnectionService(db).credential(
+        companyId, req.params.connectionId as string, actor(req),
+      );
+      res.set("Cache-Control", "no-store").json(await agentmailApi(saved.value)
+        .checkAddress(`${req.body.username}@${req.body.domain}`));
     },
   );
   router.get("/companies/:companyId/email/inboxes", async (req, res) => {

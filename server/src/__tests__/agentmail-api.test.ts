@@ -24,6 +24,23 @@ const message = (extra = {}) =>
     ...extra,
   });
 describe("AgentMail protocol boundary", () => {
+  it("checks an address with a read only and reports a visible inbox as taken", async () => {
+    const fetcher = vi.fn(async () => Response.json({ inbox_id: "ralph@agentmail.to" }));
+    await expect(agentmailApi("private-key", fetcher).checkAddress("ralph@agentmail.to"))
+      .resolves.toEqual({ address: "ralph@agentmail.to", status: "taken" });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(fetcher).toHaveBeenCalledWith("https://api.agentmail.to/v0/inboxes/ralph%40agentmail.to", expect.objectContaining({ method: "GET", body: undefined }));
+  });
+  it("never treats a hidden or missing inbox as proof that an address is available", async () => {
+    const fetcher = vi.fn(async () => Response.json({ code: "not_found" }, { status: 404 }));
+    await expect(agentmailApi("private-key", fetcher).checkAddress("ralph@agentmail.to"))
+      .resolves.toEqual({ address: "ralph@agentmail.to", status: "unknown" });
+  });
+  it.each([401, 403, 429, 503])("preserves lookup errors (%s) rather than claiming an address is taken or free", async status => {
+    const fetcher = vi.fn(async () => Response.json({ code: "missing_permission" }, { status }));
+    await expect(agentmailApi("private-key", fetcher).checkAddress("ralph@agentmail.to"))
+      .rejects.toMatchObject({ status, operation: "get_inbox" });
+  });
   it("verifies the exact raw body and rejects forged or stale Svix signatures", () => {
     const secret = `whsec_${Buffer.from("a-test-secret-only").toString("base64")}`;
     const body = JSON.stringify({

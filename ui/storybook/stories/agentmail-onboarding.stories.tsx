@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import type { Meta, StoryObj } from "@storybook/react-vite";
-import { expect, userEvent, within } from "storybook/test";
+import { expect, userEvent, waitFor, within } from "storybook/test";
 import { EmailEndpointSetup } from "@/pages/apps/chat/EmailEndpointSetup";
 import { ChatSetupSidebar } from "@/components/chat/ChatSetupNavigation";
 import { ChatSetupSidebarProvider } from "@/context/ChatSetupSidebarContext";
@@ -37,7 +37,7 @@ function AgentMailJourney({ savedConnection = true }: { savedConnection?: boolea
   </ChatSetupSidebarProvider>;
 }
 
-type Scenario = { scopedKey?: boolean; missingBoundary?: boolean; denySetup?: boolean };
+type Scenario = { scopedKey?: boolean; missingBoundary?: boolean; denySetup?: boolean; initialTaken?: boolean; noCustomDomain?: boolean; checkFailed?: boolean };
 const meta = {
   title: "Connections/AgentMail setup",
   component: AgentMailJourney,
@@ -69,8 +69,13 @@ const meta = {
       if (url.pathname.endsWith("/email/connections/" + CONNECTION + "/inspect")) return Response.json({
         scope: { scope_type: scenario.scopedKey ? "inbox" : "organization" },
         inboxes: [{ inbox_id: "support@agentmail.to" }, { inbox_id: "help@paperclip.example" }],
-        domains: [{ domain_id: "custom-domain", domain: "paperclip.example", status: "VERIFIED" }],
+        domains: scenario.noCustomDomain ? [] : [{ domain_id: "custom-domain", domain: "paperclip.example", status: "VERIFIED" }],
       });
+      if (url.pathname.endsWith("/email/connections/" + CONNECTION + "/check-address")) {
+        if (scenario.checkFailed) return Response.json({ error: "AgentMail is rate limiting requests. Wait a moment, then try again." }, { status: 429 });
+        return Response.json({ address: `${body.username}@${body.domain}`,
+          status: body.username === "taken" || (scenario.initialTaken && body.username === "ralph") ? "taken" : "unknown" });
+      }
       if (url.pathname.endsWith("/email/inboxes")) {
         if (method === "GET") return Response.json([]);
         if (body.username === "taken") return Response.json({ error: ADDRESS_TAKEN, code: "agentmail_address_taken",
@@ -105,7 +110,6 @@ const takenAddress: NonNullable<Story["play"]> = async context => {
   const canvas = within(context.canvasElement);
   await userEvent.clear(canvas.getByLabelText("Ralph’s email address"));
   await userEvent.type(canvas.getByLabelText("Ralph’s email address"), "taken");
-  await userEvent.click(canvas.getByRole("button", { name: "Create email address" }));
   await expect(await canvas.findByRole("alert")).toHaveTextContent(ADDRESS_TAKEN);
   await expect(canvas.getByLabelText("Ralph’s email address")).toHaveAttribute("aria-invalid", "true");
 };
@@ -114,11 +118,19 @@ export const Walkthrough: Story = { name: "Start here · Pick agent, pick email"
 export const ChooseAgent: Story = { name: "01 · Pick an agent" };
 export const ChooseAddress: Story = { name: "02 · Pick their email", play: chooseAddress };
 export const AddressTaken: Story = { name: "Error · Email address already in use", play: takenAddress };
+export const InitialAddressTaken: Story = { name: "Initial name taken · Click an alternative", parameters: { agentmailScenario: { initialTaken: true } }, play: async context => {
+  await chooseAddress(context);
+  const canvas = within(context.canvasElement);
+  await expect(await canvas.findByRole("alert")).toHaveTextContent(ADDRESS_TAKEN);
+  await expect(canvas.getByRole("button", { name: "ralph-agent@paperclip.example" })).toBeVisible();
+} };
+export const SharedDomain: Story = { name: "No custom domain · Shared AgentMail domain", parameters: { agentmailScenario: { noCustomDomain: true } }, play: chooseAddress };
+export const LookupUnavailable: Story = { name: "Address lookup temporarily unavailable", parameters: { agentmailScenario: { checkFailed: true } }, play: chooseAddress };
 export const ExistingInbox: Story = { name: "Use an existing inbox", play: async context => {
   await chooseAddress(context);
   await userEvent.click(within(context.canvasElement).getByRole("button", { name: "Use an existing inbox" }));
 } };
-export const AdvancedOptions: Story = { name: "Advanced · Domain and email settings", play: async context => {
+export const AdvancedOptions: Story = { name: "Advanced · Email settings", play: async context => {
   await chooseAddress(context);
   await userEvent.click(within(context.canvasElement).getByText("Advanced options"));
 } };
@@ -134,12 +146,14 @@ export const InvalidKey: Story = { name: "Error · Invalid API key", args: { sav
 } };
 export const ProviderDenied: Story = { name: "Error · Provider permission denied", parameters: { agentmailScenario: { denySetup: true } }, play: async context => {
   await chooseAddress(context);
+  await waitFor(() => expect(within(context.canvasElement).getByRole("button", { name: "Create email address" })).toBeEnabled());
   await userEvent.click(within(context.canvasElement).getByRole("button", { name: "Create email address" }));
   await expect(await within(context.canvasElement).findByRole("alert")).toHaveTextContent("AgentMail did not allow");
 } };
 export const Ready: Story = { name: "Done · Email ready", play: async context => {
   await chooseAddress(context);
   const canvas = within(context.canvasElement);
+  await waitFor(() => expect(canvas.getByRole("button", { name: "Create email address" })).toBeEnabled());
   await userEvent.click(canvas.getByRole("button", { name: "Create email address" }));
   await expect(await canvas.findByRole("heading", { name: "Your agent’s email is ready" })).toBeVisible();
 } };
@@ -147,12 +161,13 @@ export const Mobile: Story = { name: "Mobile · Pick their email", globals: { vi
 export const TestedWalkthrough: Story = { name: "Verification · Correct a taken address and finish", play: async context => {
   await takenAddress(context);
   const canvas = within(context.canvasElement);
-  await userEvent.clear(canvas.getByLabelText("Ralph’s email address"));
-  await userEvent.type(canvas.getByLabelText("Ralph’s email address"), "ralph-team");
+  await userEvent.click(canvas.getByRole("button", { name: "taken-agent@paperclip.example" }));
+  await expect(canvas.getByLabelText("Ralph’s email address")).toHaveValue("taken-agent");
   await expect(canvas.queryByRole("alert")).not.toBeInTheDocument();
+  await waitFor(() => expect(canvas.getByRole("button", { name: "Create email address" })).toBeEnabled());
   await userEvent.click(canvas.getByRole("button", { name: "Create email address" }));
   await expect(await canvas.findByRole("heading", { name: "Your agent’s email is ready" })).toBeVisible();
-  await expect(canvas.getByText("ralph-team@agentmail.to", { exact: true })).toBeVisible();
+  await expect(canvas.getByText("taken-agent@paperclip.example", { exact: true })).toBeVisible();
   await userEvent.click(canvas.getByRole("button", { name: "Done" }));
   await expect(await canvas.findByText("Setup complete.")).toBeVisible();
 } };

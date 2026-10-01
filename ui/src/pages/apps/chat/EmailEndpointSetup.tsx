@@ -1,6 +1,7 @@
 import { isUuidLike } from "@paperclipai/shared";
 import { ApiError } from "@/api/client";
 import { AgentMailApiKeyField } from "@/features/connections/AgentMailApiKeyField";
+import { useEmailAddressCheck } from "@/features/connections/useEmailAddressCheck";
 import { ChatSetupNavigation } from "@/components/chat/ChatSetupNavigation";
 import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -50,6 +51,8 @@ interface EmailSetupDraft {
   connectionId: string; step: 0 | 1; agentId: string; requestId: string;
   addressMode: "new" | "existing"; inboxId: string; username: string; domain: string;
   mode: "websocket" | "webhook";
+  domainSelected: boolean;
+  takenAddresses: string[];
 }
 function readEmailSetupDraft(key: string): Partial<EmailSetupDraft> {
   try {
@@ -63,6 +66,9 @@ function readEmailSetupDraft(key: string): Partial<EmailSetupDraft> {
     if (typeof value.requestId === "string" && isUuidLike(value.requestId)) draft.requestId = value.requestId;
     if (value.addressMode === "new" || value.addressMode === "existing") draft.addressMode = value.addressMode;
     if (value.mode === "websocket" || value.mode === "webhook") draft.mode = value.mode;
+    if (typeof value.domainSelected === "boolean") draft.domainSelected = value.domainSelected;
+    if (Array.isArray(value.takenAddresses)) draft.takenAddresses = value.takenAddresses
+      .filter((address: unknown): address is string => typeof address === "string" && address.length <= 320).slice(-20);
     return draft;
   } catch { return {}; }
 }
@@ -89,6 +95,8 @@ function EmailEndpointSetupForm({ companyId }: { companyId: string }) {
   const [inboxId, setInboxId] = useState(draft.inboxId ?? "");
   const [username, setUsername] = useState(draft.username ?? "");
   const [domain, setDomain] = useState(draft.domain ?? "agentmail.to");
+  const [domainSelected, setDomainSelected] = useState(draft.domainSelected ?? (!!draft.domain && draft.domain !== "agentmail.to"));
+  const [takenAddresses, setTakenAddresses] = useState<string[]>(draft.takenAddresses ?? []);
   const [mode, setMode] = useState<"websocket" | "webhook">(draft.mode ?? "websocket");
   const [trustOpen, setTrustOpen] = useState(false);
   const [permissions, setPermissions] = useState<Partial<AgentPermissions>>({});
@@ -99,9 +107,9 @@ function EmailEndpointSetupForm({ companyId }: { companyId: string }) {
     try {
       if (step === 2) sessionStorage.removeItem(draftKey);
       else sessionStorage.setItem(draftKey, JSON.stringify({ connectionId, step, agentId,
-        requestId, addressMode, inboxId, username, domain, mode }));
+        requestId, addressMode, inboxId, username, domain, domainSelected, takenAddresses, mode }));
     } catch { /* Setup remains usable when browser storage is unavailable. */ }
-  }, [companyId, draftKey, connectionId, step, agentId, requestId, addressMode, inboxId, username, domain, mode]);
+  }, [companyId, draftKey, connectionId, step, agentId, requestId, addressMode, inboxId, username, domain, domainSelected, takenAddresses, mode]);
   const agents = useQuery({ queryKey: queryKeys.agents.list(companyId),
     queryFn: () => agentsApi.list(companyId), enabled: !!companyId });
   const projects = useQuery({ queryKey: queryKeys.projects.list(companyId),
@@ -124,6 +132,13 @@ function EmailEndpointSetupForm({ companyId }: { companyId: string }) {
     if (pendingEndpoint) setAgentId(pendingEndpoint.assignedAgentId);
   }, [pendingEndpoint]);
   const scopedKey = inspected.data?.scope.scope_type === "inbox";
+  const customDomains = [...new Set(inspected.data?.domains
+    .filter(d => d.status === "VERIFIED" && d.domain.toLowerCase() !== "agentmail.to")
+    .map(d => d.domain.toLowerCase()) ?? [])];
+  const defaultDomain = customDomains[0] ?? "agentmail.to";
+  useEffect(() => {
+    if (inspected.isSuccess && !domainSelected && !pendingAddress) setDomain(defaultDomain);
+  }, [inspected.isSuccess, domainSelected, pendingAddress, defaultDomain]);
   useEffect(() => {
     if (scopedKey) {
       setAddressMode("existing");
@@ -171,7 +186,10 @@ function EmailEndpointSetupForm({ companyId }: { companyId: string }) {
       ...(pendingAddress ? { inboxId: pendingAddress } : addressMode === "existing" ? { inboxId } : { username, domain }),
       receiveMode: mode, idempotencyKey: requestId,
     }),
-    onError: async () => {
+    onError: async (error) => {
+      if (error instanceof ApiError && (error.body as { code?: string } | null)?.code === "agentmail_address_taken") {
+        setTakenAddresses(previous => [...new Set([...previous, `${username}@${domain}`.toLowerCase()])].slice(-20));
+      }
       await cache.invalidateQueries({ queryKey: ["email-inboxes", companyId] });
     },
     onSuccess: () => {
@@ -181,9 +199,17 @@ function EmailEndpointSetupForm({ companyId }: { companyId: string }) {
     },
   });
   const address = pendingAddress ?? (addressMode === "existing" ? inboxId : `${username}@${domain}`);
-  const knownAddress = !pendingAddress && addressMode === "new" && inspected.data?.inboxes.some(i => i.inbox_id.toLowerCase() === address.toLowerCase());
-  const addressTaken = knownAddress || (setup.error instanceof ApiError
-    && (setup.error.body as { code?: string } | null)?.code === "agentmail_address_taken");
+  const knownAddresses = new Set([...takenAddresses, ...(inspected.data?.inboxes.map(i => i.inbox_id.toLowerCase()) ?? [])]);
+  const checkingNewAddress = step === 1 && addressMode === "new" && !pendingAddress && !scopedKey;
+  const knownAddress = checkingNewAddress && knownAddresses.has(address.toLowerCase());
+  const validUsername = /^[a-z0-9][a-z0-9._-]*$/.test(username) && username.length <= 64;
+  const addressCheck = useEmailAddressCheck(companyId, connectionId, username, domain,
+    checkingNewAddress && validUsername && !!inspected.data && !knownAddress);
+  const addressTaken = knownAddress || addressCheck.result?.status === "taken";
+  const suggestions = checkingNewAddress && validUsername && (addressTaken || addressCheck.result?.status === "unknown")
+    ? ["-agent", "-team", `-${requestId.slice(0, 6)}`]
+      .map(suffix => `${username.slice(0, 64 - suffix.length)}${suffix}`)
+      .filter(name => !knownAddresses.has(`${name}@${domain}`)) : [];
   const assignedInbox = addressMode === "existing" && inboxes.data?.some(i => i.id !== requestId && i.address === address && i.status !== "archived");
   const addressError = addressTaken ? "This email address is already in use. Choose a different address."
     : assignedInbox ? "This inbox is already assigned to an agent." : null;
@@ -191,8 +217,8 @@ function EmailEndpointSetupForm({ companyId }: { companyId: string }) {
   const busy = connect.isPending || setup.isPending;
   const identityReady = inboxes.isSuccess && (!pendingEndpoint || pendingEndpoint.assignedAgentId === agentId);
   const canContinue = identityReady && !!chosen && !busy && !(lowTrust && !scoped) && (!!connectionId || !!apiKey.trim());
-  const canCreate = identityReady && !!chosen && !busy && !!inspected.data && !(lowTrust && !scoped) && !addressError
-    && (!!pendingAddress || (addressMode === "existing" ? !!inboxId : /^[a-z0-9][a-z0-9._-]*$/.test(username)));
+  const canCreate = identityReady && !!chosen && !busy && !!inspected.data && !(lowTrust && !scoped) && !addressError && !addressCheck.checking
+    && (!!pendingAddress || (addressMode === "existing" ? !!inboxId : validUsername));
   const openTrust = () => { if (chosen) { setPermissions(chosen.permissions); setTrustOpen(true); } };
   const leave = () => navigate(connectionId ? `/apps/${connectionId}/permissions` : "/apps");
   const cancel = () => { try { sessionStorage.removeItem(draftKey); } catch {} leave(); };
@@ -234,9 +260,13 @@ function EmailEndpointSetupForm({ companyId }: { companyId: string }) {
         {addressMode === "new" ? <>
           <div className="flex items-center gap-2">
             <Input id="email-name" className="min-w-0" value={pendingAddress ? pendingAddress.slice(0, pendingAddress.lastIndexOf("@")) : username} maxLength={64} autoComplete="off" spellCheck={false} disabled={busy} readOnly={!!pendingAddress}
-              aria-invalid={!!addressError} aria-describedby={addressError ? "email-address-error" : undefined}
+              aria-invalid={!!addressError} aria-describedby={addressError ? "email-address-error" : "email-address-status"}
               onChange={event => { setUsername(event.target.value.toLowerCase()); setup.reset(); }} />
-            <span className="max-w-1/2 shrink-0 break-all text-sm text-muted-foreground">@{pendingAddress ? pendingAddress.slice(pendingAddress.lastIndexOf("@") + 1) : domain}</span>
+            <select id="email-domain" aria-label="Email domain" className={`${selectClass} max-w-1/2 shrink-0`} value={pendingAddress ? pendingAddress.slice(pendingAddress.lastIndexOf("@") + 1) : domain}
+              disabled={busy || !!pendingAddress || !inspected.data} onChange={event => { setDomainSelected(true); setDomain(event.target.value); setup.reset(); }}>
+              {[...new Set([...customDomains, "agentmail.to", domain, ...(pendingAddress ? [pendingAddress.slice(pendingAddress.lastIndexOf("@") + 1)] : [])])]
+                .map(value => <option key={value} value={value}>@{value}</option>)}
+            </select>
           </div>
         </> : <select id="email-existing" className={selectClass} value={pendingAddress ?? inboxId} disabled={busy || scopedKey || !!pendingAddress}
           aria-invalid={!!addressError} aria-describedby={addressError ? "email-address-error" : undefined}
@@ -249,6 +279,15 @@ function EmailEndpointSetupForm({ companyId }: { companyId: string }) {
         </select>}
         {pendingAddress && <p className="text-sm text-muted-foreground">This address is reserved for {chosen?.name}. Continue to finish connecting it.</p>}
         {addressError && <p id="email-address-error" role="alert" className="text-sm text-destructive">{addressError}</p>}
+        {checkingNewAddress && !addressError && <p id="email-address-status" role="status" className="text-sm text-muted-foreground">
+          {addressCheck.checking ? "Checking address…" : addressCheck.error ? `Could not check this address. ${addressCheck.error}`
+            : addressCheck.result?.status === "unknown" ? "AgentMail confirms availability when you create the address." : null}
+        </p>}
+        {suggestions.length > 0 && <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm" aria-label="Suggested email addresses">
+          <span className="text-muted-foreground">Try:</span>
+          {suggestions.map(name => <Button key={name} type="button" variant="link" size="sm" className="h-auto p-0" disabled={busy}
+            onClick={() => { setUsername(name); setup.reset(); }}>{name}@{domain}</Button>)}
+        </div>}
         {!scopedKey && !pendingAddress && <Button type="button" variant="link" size="sm" className="h-auto p-0" disabled={busy}
           onClick={() => { setAddressMode(addressMode === "new" ? "existing" : "new"); setup.reset(); }}>
           {addressMode === "new" ? "Use an existing inbox" : "Create a new address"}
@@ -259,11 +298,6 @@ function EmailEndpointSetupForm({ companyId }: { companyId: string }) {
         <summary className="cursor-pointer text-sm text-muted-foreground">Advanced options</summary>
         <div className="space-y-4">
           {addressMode === "new" && <div className="space-y-2">
-            <Label htmlFor="email-domain">Domain</Label>
-            <select id="email-domain" value={pendingAddress ? pendingAddress.slice(pendingAddress.lastIndexOf("@") + 1) : domain} disabled={busy || !!pendingAddress} className={selectClass} onChange={event => { setDomain(event.target.value); setup.reset(); }}>
-              <option>agentmail.to</option>
-              {inspected.data?.domains.filter(d => d.status === "VERIFIED").map(d => <option key={d.domain_id}>{d.domain}</option>)}
-            </select>
             <a className="text-sm underline" href="https://docs.agentmail.to/custom-domains" target="_blank" rel="noreferrer">Set up a custom domain ↗</a>
           </div>}
           <div className="space-y-2">

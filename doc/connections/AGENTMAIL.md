@@ -4,7 +4,9 @@ AgentMail is an experimental **channel** connection. Enable experimental chat
 connections and open Apps → AgentMail. Setup has two steps: pick the agent, then
 pick its email address and create it. For a new connection, the first step also
 asks for the API key and defaults to company-wide human access and only the
-selected agent. Saved connections skip the key field. Custom domains, receiving
+selected agent. Saved connections skip the key field. The domain dropdown sits
+beside the email name and defaults to the first verified custom domain, falling
+back to `agentmail.to`. An explicit choice is preserved across reloads. Receiving
 mode, sender guidance, and trust settings are under **Advanced options**; an
 existing low-trust agent still needs its required work boundary and runtime.
 There is no separate review or Permissions detour. Each provider thread in the
@@ -200,9 +202,20 @@ response body. An inbox-creation `resource_taken` or `already_exists` error,
 including HTTP 403, appears beside the email field as “This email address is
 already in use.” Other 403 errors retain permission guidance. Provider messages,
 fixes, and links are never forwarded. Existing addresses visible to the saved
-account are flagged before submission; other taken addresses are reported when
-creation is attempted, without leaving the address step. Paperclip does not claim
-global availability before AgentMail accepts creation.
+account are flagged before submission. The initial name and subsequent edits
+trigger a read-only check after a 350 ms pause; changing the name or domain
+aborts the previous request and ignores its result. Checks use the saved credential
+behind the same company, connection-management, and connector-feature gates.
+Taken addresses show clickable alternatives, excluding known conflicts. A failed
+creation also remembers that address in the non-secret setup draft.
+
+[AgentMail's `not_found` response](https://docs.agentmail.to/errors#not_found)
+also hides inboxes outside the credential's scope, so a lookup cannot prove
+global availability. Missing addresses show that availability is confirmed on
+creation and offer alternatives without claiming they are free. Lookup failures
+are visible and leave creation available for its authoritative check; known
+conflicts and pending checks disable creation. Other taken addresses are reported
+when creation is attempted, without leaving the address step.
 
 Browser refresh preserves non-secret draft fields and the setup request ID;
 API keys are never saved in browser storage. Retrying the same setup resumes any

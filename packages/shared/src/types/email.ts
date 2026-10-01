@@ -52,3 +52,8 @@ export interface EmailThreadSummary {
   messages: EmailMessage[];
   publications: EmailPublicationSummary[];
 }
+/** A missing inbox is not proof of availability: AgentMail hides other accounts. */
+export interface EmailAddressCheckResult {
+  address: string;
+  status: "taken" | "unknown";
+}

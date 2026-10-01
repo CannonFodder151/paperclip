@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { Webhook } from "svix";
-import type { EmailEnvelope } from "@paperclipai/shared";
+import type { EmailAddressCheckResult, EmailEnvelope } from "@paperclipai/shared";
 
 const strings = z.array(z.string());
 export const agentmailMessageSchema = z.object({
@@ -284,6 +284,18 @@ export function agentmailApi(apiKey: string, fetchImpl: typeof fetch = fetch) {
     request,
     whoami: () => request<AgentmailScope>("/auth/me"),
     getInbox: (id: string) => request<AgentmailInbox>(inboxPath(id)),
+    checkAddress: async (address: string): Promise<EmailAddressCheckResult> => {
+      try {
+        await request<AgentmailInbox>(inboxPath(address));
+        return { address, status: "taken" };
+      } catch (error) {
+        // https://docs.agentmail.to/errors#not_found: 404 also hides inboxes
+        // outside this credential's scope. Never claim these addresses are free.
+        if (error instanceof AgentmailApiError && error.status === 404)
+          return { address, status: "unknown" };
+        throw error;
+      }
+    },
     listInboxes: () =>
       request<{ inboxes: AgentmailInbox[] }>("/inboxes?limit=100"),
     listDomains: () =>
