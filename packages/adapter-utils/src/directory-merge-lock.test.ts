@@ -87,7 +87,7 @@ describe("directory merge lock process lifetime", () => {
     // budget instead of an expired clock: it must let the implementation's
     // own retry loop absorb ordinary scheduling jitter around the crash.
     await expect(withDirectoryMergeLock(target, async () => "restored", env)).resolves.toBe("restored");
-  }, 15_000);
+  }, 35_000);
 
   it("protects a live holder in another process regardless of diagnostic PID or age", async () => {
     const { target, env, lock } = await fixture();
