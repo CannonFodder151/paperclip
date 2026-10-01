@@ -55,11 +55,16 @@ describe("AgentMail connection management tabs", () => {
   async function render(tab: string) {
     mocks.tab = tab;
     await act(async () => root.render(<QueryClientProvider client={client}><TooltipProvider><ChatEndpointDetail /></TooltipProvider></QueryClientProvider>));
-    await settle();
+    await vi.waitFor(() => {
+      expect(container.textContent?.trim().length).toBeGreaterThan(0);
+      expect(container.textContent).not.toMatch(/Loading (connection|access|conversations|activity)…/);
+    }, { timeout: 3000 });
   }
   async function click(label: string) {
     const button = [...container.querySelectorAll("button")].find(node => node.textContent?.trim() === label);
-    expect(button).toBeDefined(); await act(async () => button!.click()); await settle();
+    expect(button).toBeDefined(); await act(async () => button!.click());
+    await vi.waitFor(() => expect(button!.disabled).toBe(false), { timeout: 3000 });
+    await settle();
   }
   it("renders settings only on Settings and loads the saved credential on Access", async () => {
     await render("settings"); expect(container.textContent).toContain("Email settings");
@@ -94,9 +99,14 @@ describe("AgentMail connection management tabs", () => {
     mocks.conversations.mockResolvedValue([]); await click("Try again"); expect(container.textContent).toContain("Send an email");
   });
   it("loads activity and routes pause through the email API without replacing cached chat detail with an email summary", async () => {
-    mocks.activity.mockResolvedValue({ items: [{ id: "delivery", kind: "delivery", status: "failed", summary: "Email received", createdAt: "2026-10-01T00:00:00Z", replayable: true,
+    mocks.activity.mockImplementation(async () => {
+      // Query completion can follow the initial endpoint render, especially
+      // while the complete UI suite is running. Wait for data, not a short sleep.
+      await new Promise(resolve => setTimeout(resolve, 100));
+      return { items: [{ id: "delivery", kind: "delivery", status: "failed", summary: "Email received", createdAt: "2026-10-01T00:00:00Z", replayable: true,
       resolutionActions: ["retry_anyway"] }, { id: "publication", kind: "publication", status: "delivery_unknown", summary: "Email send unconfirmed",
-      createdAt: "2026-10-01T00:00:00Z", resolutionActions: ["mark_delivered", "retry_anyway", "cancel"] }], nextCursor: null });
+      createdAt: "2026-10-01T00:00:00Z", resolutionActions: ["mark_delivered", "retry_anyway", "cancel"] }], nextCursor: null };
+    });
     await render("activity"); expect(container.textContent).toContain("Email received");
     expect(container.textContent).not.toContain("Email settings"); expect(container.textContent).not.toContain("Replay");
     expect([...container.querySelectorAll("button")].some(button => button.textContent?.trim() === "Resolve")).toBe(false);
