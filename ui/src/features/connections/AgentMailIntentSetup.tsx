@@ -34,7 +34,10 @@ export function AgentMailIntentSetup({ companyId, agentId, requestId, savedCrede
   const [draft] = useState(() => readDraft(draftKey));
   const [setupRequestId, setSetupRequestId] = useState(draft?.setupRequestId ?? requestId);
   const [apiKey, setApiKey] = useState("");
-  const [credentialId, setCredentialId] = useState(draft ? draft.credentialId : savedCredentialId ?? null);
+  // A refresh can interrupt the response after the server has saved the key.
+  // Recover that account unless the user deliberately started a different setup.
+  const [credentialId, setCredentialId] = useState(draft?.credentialId
+    ?? (!draft || draft.setupRequestId === requestId ? savedCredentialId ?? null : null));
   const [selectedCredentialId, setSelectedCredentialId] = useState<string | null>(draft?.selectedCredentialId ?? null);
   const [inboxConnectionId, setInboxConnectionId] = useState(readyConnectionId ?? draft?.inboxConnectionId ?? null);
   useEffect(() => {

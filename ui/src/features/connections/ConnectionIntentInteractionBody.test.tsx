@@ -688,6 +688,33 @@ describe("AgentMail inline setup", () => {
     expect(emailControlMock).not.toHaveBeenCalled();
     expect(document.querySelector('input[type="password"]')).toBeNull();
   });
+  it("recovers the server-saved account when refresh interrupted its response", async () => {
+    const resumedInteraction = { ...interaction, id: "a381e91e-7127-427d-9d2d-519d4deba89f" };
+    sessionStorage.setItem(`paperclip.agentmail-inline:${interaction.companyId}:${resumedInteraction.id}`, JSON.stringify({
+      setupRequestId: resumedInteraction.id, credentialId: null, inboxConnectionId: null, selectedCredentialId: "",
+    }));
+    setupOptionsMock.mockResolvedValue({ existingConnections: [], emailSetup: { credentialConnectionId: "server-saved-account", readyConnectionId: null } });
+    renderBody(resumedInteraction); await flush();
+    expect(document.querySelector('input[type="password"]')).toBeNull();
+    await act(() => button("Finish setup")!.click()); await flush();
+    expect(emailConnectMock).not.toHaveBeenCalled();
+    expect(emailSetupMock).toHaveBeenCalledWith(interaction.companyId, expect.objectContaining({
+      credentialConnectionId: "server-saved-account", idempotencyKey: resumedInteraction.id,
+    }));
+  });
+  it("does not restore an abandoned server account after the user changes keys", async () => {
+    const replacementRequestId = "a381e91e-7127-427d-9d2d-519d4deba89f";
+    sessionStorage.setItem(`paperclip.agentmail-inline:${interaction.companyId}:${interaction.id}`, JSON.stringify({
+      setupRequestId: replacementRequestId, credentialId: null, inboxConnectionId: null, selectedCredentialId: "",
+    }));
+    setupOptionsMock.mockResolvedValue({ existingConnections: [], emailSetup: { credentialConnectionId: "abandoned-account", readyConnectionId: null } });
+    renderBody(interaction); await flush(); await enterKey();
+    await act(() => button("Connect AgentMail")!.click()); await flush();
+    expect(emailConnectMock).toHaveBeenCalledWith(interaction.companyId, expect.objectContaining({ idempotencyKey: replacementRequestId }));
+    expect(emailSetupMock).toHaveBeenCalledWith(interaction.companyId, expect.objectContaining({
+      credentialConnectionId: "email-account", idempotencyKey: replacementRequestId,
+    }));
+  });
   it("resumes a saved account after reload and retries acceptance without recreating the inbox", async () => {
     setupOptionsMock.mockResolvedValue({ existingConnections: [], emailSetup: { credentialConnectionId: "email-account", readyConnectionId: "email-inbox" } });
     completeMock.mockRejectedValueOnce(new Error("Retry completion"));
