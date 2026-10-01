@@ -100,6 +100,20 @@ test("AgentMail setup and email work through the normal task conversation", asyn
   await page.route(`**/api/tool-connections/${inbox.connectionId}`, route =>
     fulfill(route, { config: { credentialConnectionId: organizationConnectionId } }),
   );
+  await page.route(`**/api/tool-connections/${organizationConnectionId}/grants`, route =>
+    fulfill(route, { grants: [{ status: "active", kind: "organization" }], capabilities: { canConfigure: true } }),
+  );
+  await page.route(`**/api/tool-connections/${organizationConnectionId}/installs`, route =>
+    fulfill(route, { installs: [{ targetType: "agent", targetId: agent.id }] }),
+  );
+  await page.route(`**/api/chat-endpoints/${inbox.id}/conversations`, route =>
+    fulfill(route, [{ id: conversationId, externalLabel: "Customer email", issueId: task.id,
+      issueTitle: task.title, issueIdentifier: task.identifier, state: "active" }]),
+  );
+  await page.route(`**/api/chat-endpoints/${inbox.id}/activity?*`, route =>
+    fulfill(route, { items: [{ id: randomUUID(), kind: "delivery", status: "processed",
+      summary: "Email received", createdAt: new Date().toISOString() }], nextCursor: null }),
+  );
   await page.route("**/api/**/email/**", async (route) => {
     const url = new URL(route.request().url()),
       method = route.request().method();
@@ -175,6 +189,7 @@ test("AgentMail setup and email work through the normal task conversation", asyn
       provider: "agentmail",
       setup: { step: "complete" },
       capabilities: {},
+      assignedAgentName: agent.name,
       botExternalId: inbox.address,
     }),
   );
@@ -255,6 +270,23 @@ test("AgentMail setup and email work through the normal task conversation", asyn
   expect(setupRequests.map(input => input.username)).toEqual(["mail-agent", "mail-agent-free", undefined]);
   expect(setupRequests[2]).toMatchObject({ inboxId: "mail-agent-free@verified.example.test" });
   expect(new Set(setupRequests.map(input => input.idempotencyKey)).size).toBe(1);
+  await page.getByRole("button", { name: "Email settings", exact: true }).click();
+  await expect(page.getByRole("heading", { name: inbox.address, exact: true })).toBeVisible();
+  const navigation = page.getByRole("navigation", { name: "Chat connection" });
+  await navigation.getByRole("link", { name: "Access", exact: true }).click();
+  await expect(page.getByText("Any human in the organization", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Reconnect inbox", exact: true })).toHaveCount(0);
+  await navigation.getByRole("link", { name: "Conversations", exact: true }).click();
+  await expect(page.getByRole("list", { name: "Conversations" })).toBeVisible();
+  await expect(page.getByRole("link", { name: "Open task", exact: true })).toHaveAttribute("href", `/${company.issuePrefix}/issues/${task.id}`);
+  await page.reload();
+  await expect(page.getByRole("list", { name: "Conversations" })).toBeVisible();
+  await navigation.getByRole("link", { name: "Activity", exact: true }).click();
+  await expect(page.getByText("Email received", { exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Connection activity", exact: true })).toBeVisible();
+  await page.screenshot({ path: test.info().outputPath("agentmail-management-tabs.png"), fullPage: true });
+  await navigation.getByRole("link", { name: "Settings", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Reconnect inbox", exact: true })).toBeVisible();
   await page.goto(`/${company.issuePrefix}/issues/${task.identifier}`);
   const email = page.getByRole("article", { name: "Email received", exact: true });
   await expect(email).toBeVisible();
