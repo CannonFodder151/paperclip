@@ -109,7 +109,9 @@ type Story = StoryObj<typeof meta>;
 
 const chooseAgent: NonNullable<Story["play"]> = async ({ canvasElement }) => {
   const canvas = within(canvasElement);
-  await userEvent.click(await canvas.findByLabelText("Agent"));
+  const picker = await canvas.findByLabelText("Agent");
+  await waitFor(() => expect(picker).toBeEnabled());
+  await userEvent.click(picker);
   const page = within(canvasElement.ownerDocument.body);
   await userEvent.type(page.getByPlaceholderText("Filter agents"), "Ralph");
   await userEvent.click(await page.findByRole("button", { name: "Select Ralph" }));
@@ -117,6 +119,7 @@ const chooseAgent: NonNullable<Story["play"]> = async ({ canvasElement }) => {
 const chooseAddress: NonNullable<Story["play"]> = async context => {
   await chooseAgent(context);
   const canvas = within(context.canvasElement);
+  await waitFor(() => expect(canvas.getByRole("button", { name: "Continue" })).toBeEnabled());
   await userEvent.click(canvas.getByRole("button", { name: "Continue" }));
   await expect(await canvas.findByLabelText("Ralph’s email address")).toHaveValue("ralph");
 };
