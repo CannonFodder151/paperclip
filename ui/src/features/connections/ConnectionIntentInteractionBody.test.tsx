@@ -608,6 +608,11 @@ describe("AgentMail inline setup", () => {
     ...pendingConnectionIntentInteraction,
     payload: { ...pendingConnectionIntentInteraction.payload, purpose: "channel", serviceSlug: "agentmail", serviceName: "AgentMail" },
   };
+  async function clickReadyButton(label: string) {
+    await waitForAssertion(() => expect(button(label)?.disabled).toBe(false));
+    await act(() => button(label)!.click());
+    await flush();
+  }
   async function enterKey() {
     await waitForAssertion(() => expect(document.querySelector('input[type="password"]')).not.toBeNull());
     const input = document.querySelector('input[type="password"]') as HTMLInputElement;
@@ -625,8 +630,7 @@ describe("AgentMail inline setup", () => {
     expect(document.querySelector('[role="radiogroup"], select')).toBeNull();
     expect(button("Connect AgentMail")?.disabled).toBe(true);
     await enterKey();
-    await act(() => button("Connect AgentMail")!.click());
-    await flush();
+    await clickReadyButton("Connect AgentMail");
     expect(emailConnectMock).toHaveBeenCalledWith(interaction.companyId, {
       apiKey: "fixture-api-key", grantKind: "organization", allAgents: false,
       agentIds: [interaction.payload.requestingAgentId], idempotencyKey: interaction.id,
@@ -640,20 +644,20 @@ describe("AgentMail inline setup", () => {
   it("keeps invalid credentials retryable and does not create an inbox or accept the request", async () => {
     emailConnectMock.mockRejectedValueOnce(new Error("AgentMail request failed (401)"));
     renderBody(interaction); await flush(); await enterKey();
-    await act(() => button("Connect AgentMail")!.click()); await flush();
+    await clickReadyButton("Connect AgentMail");
     expect(document.querySelector('[role="alert"]')?.textContent).toContain("401");
     expect(emailSetupMock).not.toHaveBeenCalled();
     expect(completeMock).not.toHaveBeenCalled();
-    await act(() => button("Connect AgentMail")!.click()); await flush();
+    await clickReadyButton("Connect AgentMail");
     expect(completeMock).toHaveBeenCalledTimes(1);
   });
   it("retries inbox setup without asking for or saving the key again", async () => {
     emailSetupMock.mockRejectedValueOnce(new Error("Inbox setup unavailable"));
     renderBody(interaction); await flush(); await enterKey();
-    await act(() => button("Connect AgentMail")!.click()); await flush();
+    await clickReadyButton("Connect AgentMail");
     expect(completeMock).not.toHaveBeenCalled();
     expect(document.querySelector('input[type="password"]')).toBeNull();
-    await act(() => button("Finish setup")!.click()); await flush();
+    await clickReadyButton("Finish setup");
     expect(emailConnectMock).toHaveBeenCalledTimes(1);
     expect(emailSetupMock).toHaveBeenCalledTimes(2);
     expect(completeMock).toHaveBeenCalledWith(interaction.id, "email-inbox");
@@ -667,19 +671,19 @@ describe("AgentMail inline setup", () => {
     await waitForAssertion(() => expect(button("Connect AgentMail")?.disabled).toBe(false));
     expect((document.querySelector("select") as HTMLSelectElement)?.value).toBe("saved-account");
     expect(emailConnectMock).not.toHaveBeenCalled();
-    await act(() => button("Connect AgentMail")!.click()); await flush();
+    await clickReadyButton("Connect AgentMail");
     expect(emailConnectMock).not.toHaveBeenCalled();
-    await act(() => button("Change API key")!.click()); await flush();
+    await clickReadyButton("Change API key");
     expect(emailControlMock).toHaveBeenCalledWith(interaction.id, "remove");
     await enterKey();
-    await act(() => button("Connect AgentMail")!.click()); await flush();
+    await clickReadyButton("Connect AgentMail");
     const next = emailSetupMock.mock.calls[1][1].idempotencyKey;
     expect(next).not.toBe(interaction.id);
     expect(emailConnectMock).toHaveBeenCalledWith(interaction.companyId, expect.objectContaining({ idempotencyKey: next }));
     expect(sessionStorage.getItem(`paperclip.agentmail-inline:${interaction.companyId}:${interaction.id}`)).not.toContain("fixture-api-key");
     await act(() => root!.unmount()); host!.remove(); queryClient.clear();
     renderBody(interaction); await flush();
-    await act(() => button("Finish setup")!.click()); await flush();
+    await clickReadyButton("Finish setup");
     expect(emailSetupMock.mock.calls[2][1].idempotencyKey).toBe(next);
     expect(emailConnectMock).toHaveBeenCalledTimes(1);
     expect(completeMock).toHaveBeenCalledWith(interaction.id, "email-inbox");
@@ -688,7 +692,7 @@ describe("AgentMail inline setup", () => {
     setupOptionsMock.mockResolvedValue({ existingConnections: [], emailSetup: { credentialConnectionId: "saved-account", readyConnectionId: null } });
     emailListMock.mockResolvedValue([{ id: interaction.id, address: "reserved@example.test", status: "draft" }]);
     renderBody(interaction); await flush();
-    await act(() => button("Change API key")!.click()); await flush();
+    await clickReadyButton("Change API key");
     expect(document.body.textContent).toContain("reserved@example.test is already reserved");
     expect(emailControlMock).not.toHaveBeenCalled();
     expect(document.querySelector('input[type="password"]')).toBeNull();
@@ -701,7 +705,7 @@ describe("AgentMail inline setup", () => {
     setupOptionsMock.mockResolvedValue({ existingConnections: [], emailSetup: { credentialConnectionId: "server-saved-account", readyConnectionId: null } });
     renderBody(resumedInteraction); await flush();
     expect(document.querySelector('input[type="password"]')).toBeNull();
-    await act(() => button("Finish setup")!.click()); await flush();
+    await clickReadyButton("Finish setup");
     expect(emailConnectMock).not.toHaveBeenCalled();
     expect(emailSetupMock).toHaveBeenCalledWith(interaction.companyId, expect.objectContaining({
       credentialConnectionId: "server-saved-account", idempotencyKey: resumedInteraction.id,
@@ -716,7 +720,7 @@ describe("AgentMail inline setup", () => {
     setupOptionsMock.mockResolvedValue({ existingConnections: [], emailSetup: { credentialConnectionId: "earlier-account", readyConnectionId: null } });
     renderBody(resumedInteraction); await flush();
     await waitForAssertion(() => expect((document.querySelector('select') as HTMLSelectElement)?.value).toBe("selected-account"));
-    await act(() => button("Connect AgentMail")!.click()); await flush();
+    await clickReadyButton("Connect AgentMail");
     expect(emailConnectMock).not.toHaveBeenCalled();
     expect(emailSetupMock).toHaveBeenCalledWith(interaction.companyId, expect.objectContaining({
       credentialConnectionId: "selected-account", idempotencyKey: resumedInteraction.id,
@@ -729,7 +733,7 @@ describe("AgentMail inline setup", () => {
     }));
     setupOptionsMock.mockResolvedValue({ existingConnections: [], emailSetup: { credentialConnectionId: "abandoned-account", readyConnectionId: null } });
     renderBody(interaction); await flush(); await enterKey();
-    await act(() => button("Connect AgentMail")!.click()); await flush();
+    await clickReadyButton("Connect AgentMail");
     expect(emailConnectMock).toHaveBeenCalledWith(interaction.companyId, expect.objectContaining({ idempotencyKey: replacementRequestId }));
     expect(emailSetupMock).toHaveBeenCalledWith(interaction.companyId, expect.objectContaining({
       credentialConnectionId: "email-account", idempotencyKey: replacementRequestId,
@@ -739,15 +743,15 @@ describe("AgentMail inline setup", () => {
     setupOptionsMock.mockResolvedValue({ existingConnections: [], emailSetup: { credentialConnectionId: "email-account", readyConnectionId: "email-inbox" } });
     completeMock.mockRejectedValueOnce(new Error("Retry completion"));
     renderBody(interaction); await flush();
-    await act(() => button("Continue")!.click()); await flush();
-    await act(() => button("Continue")!.click()); await flush();
+    await clickReadyButton("Continue");
+    await clickReadyButton("Continue");
     expect(emailConnectMock).not.toHaveBeenCalled();
     expect(emailSetupMock).not.toHaveBeenCalled();
     expect(completeMock).toHaveBeenCalledTimes(2);
   });
   it("declines without provider requests and hides credentials from other viewers", async () => {
     renderBody(interaction); await flush();
-    await act(() => button("Not now")!.click()); await flush();
+    await clickReadyButton("Not now");
     expect(declineMock).toHaveBeenCalledWith(interaction.id);
     expect(emailConnectMock).not.toHaveBeenCalled();
     expect(emailSetupMock).not.toHaveBeenCalled();
@@ -758,8 +762,7 @@ describe("AgentMail inline setup", () => {
     setupOptionsMock.mockRejectedValue(new Error("Email setup is unavailable"));
     renderBody(interaction);
     await waitForAssertion(() => expect(document.body.textContent).toContain("Email setup is unavailable"));
-    await act(() => button("Not now")!.click());
-    await flush();
+    await clickReadyButton("Not now");
     expect(declineMock).toHaveBeenCalledWith(interaction.id);
     expect(emailConnectMock).not.toHaveBeenCalled();
   });
