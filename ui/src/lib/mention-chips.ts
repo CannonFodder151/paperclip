@@ -177,8 +177,12 @@ function buildAgentIconMask(iconName: string | null): string | null {
   if (cached) return cached;
 
   const Icon = getAgentIcon(iconName);
-  const iconNode = resolveLucideIconNode(Icon);
-  if (!Array.isArray(iconNode) || iconNode.length === 0) return null;
+  // Lucide's component internals differ between browser and server builds.
+  // Keep the agent marker visible when its private iconNode is unavailable.
+  const iconNode = resolveLucideIconNode(Icon) ?? [
+    ["rect", { x: "3", y: "3", width: "18", height: "18", rx: "2" }],
+    ["path", { d: "M8 10h.01M16 10h.01M8 15h8" }],
+  ];
 
   const body = iconNode.map(([tag, attrs]) => {
     const attrString = Object.entries(attrs)
@@ -220,7 +224,6 @@ function resolveLucideIconNode(
     }
   ).render;
   const rendered = typeof render === "function" ? render({}, null) : null;
-  // Lucide 1.45 passes its icon data object instead of the legacy iconNode prop.
   const renderedIconNode = rendered?.props?.icon?.node ?? rendered?.props?.iconNode;
   return Array.isArray(renderedIconNode) && renderedIconNode.length > 0
     ? renderedIconNode

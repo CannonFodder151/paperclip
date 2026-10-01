@@ -626,6 +626,15 @@ budget gates, and pause gates remain independently enforced. Comment access is
 structurally downstream of issue read access (`issue:comment` is a subset of
 `issue:read`).
 
+Authenticated board direction permits a low-trust agent to execute its own
+human conversation or the exact task explicitly assigned or addressed by a human.
+This server-owned exception is bound to the current assignee and the run's task;
+it uses existing conversation identity and authenticated execution-request records,
+including same-task retry ancestry. It does not expand inherited boundaries or
+grant privileged tools. Backlog assignments retain the existing human requester
+without starting a run. Reassignment transactionally cancels prior human requests,
+including service/plugin writes; cancelled runs cannot authorize later retries. See `doc/LOW-TRUST-PRESETS.md` for containment details.
+
 Cross-issue writes are contained per heartbeat run. An agent-authored comment
 may wake the target assignee, including an explicit `resume: true` comment on a
 `done` or `cancelled` issue, but the wake remains agent-class and is subject to
@@ -1651,6 +1660,8 @@ for persistence, migration, rendering, and integration contracts.
 `enableAgentChat` is an instance experimental flag, default false. Conversation containers remain issues, unique by `(company_id, conversation_agent_id, conversation_user_id)`. The authenticated board actor supplies ownership; local trusted mode uses `local-board`. Ordinary company task access applies. A conversation's agent assignment and identity are immutable through ordinary updates; terminal status mutations are rejected.
 
 `GET /api/companies/:companyId/chats/:agentRef` reads an existing conversation or null. `POST` atomically resolves its issue when adding a chat or on first send/upload. `GET /api/companies/:companyId/chats` lists only the current board user’s conversations in that company, subject to ordinary issue read access. The Chat navigation opens a searchable secondary sidebar with agent avatars and a picker for starting or reopening the same per-agent conversation. Existing issue comment, attachment, document, interaction, and run APIs apply thereafter. User chat comments require an idempotent UUID `clientRequestId`. Conversation delivery preserves comment order through the existing issue execution queue; the durable comment outbox repairs the commit-to-enqueue crash window.
+
+The Chat navigation entry reopens the last agent conversation visited by the current user in the current company. The browser keeps this recent order and any existing conversation ID locally; unavailable agents and removed conversations are skipped. An agent chat that has no issue yet can still reopen from the agent roster. The agent chooser remains the landing view when no saved chat is available.
 
 The server owns conversation state: `waiting` plus `in_review` denotes a healthy idle conversation, and `active` denotes an unanswered or executing turn. Successful replies settle a turn; they do not finish the issue. Idle containers are excluded from execution-work counts, ordinary task lists, timer work, and recovery invocations. Failed/unanswered turns retain normal handling. Child completion never wakes or completes the conversation. Search and direct task access preserve history.
 

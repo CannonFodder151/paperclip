@@ -1,4 +1,8 @@
-import { isRetiredComposioConnection, RETIRED_COMPOSIO_MESSAGE } from "@paperclipai/shared";
+import {
+  connectionSetupVerbForApp,
+  isRetiredComposioConnection,
+  RETIRED_COMPOSIO_MESSAGE,
+} from "@paperclipai/shared";
 import { ManagedAiConnectionRow } from "@/components/ai-connections/ManagedAiConnectionDetails";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -23,6 +27,7 @@ import {
   getAppStoreDefinition,
   isToolConnectionAttentionHealth,
   aiSubscriptionNeedsIsolatedLogin,
+  GOOGLE_WORKSPACE_CONNECTOR_PROFILES,
 } from "@paperclipai/shared";
 import { useNavigate } from "@/lib/router";
 import { useChatConnectorsEnabled } from "@/hooks/useChatConnectorsEnabled";
@@ -63,6 +68,7 @@ import { buildCompanyUserProfileMap } from "@/lib/company-members";
 import { AppLogo } from "./AppLogo";
 import {
   appApplicationSourceSlug,
+  appConnectionSourceSlug,
   appDefinitionDarkLogoUrl,
   appDefinitionDescription,
   appDefinitionLogoUrl,
@@ -110,6 +116,13 @@ type ConnectionRemovalTarget = {
   remainingConnectionCount: number;
 
 };
+
+// Temporary, page-only hold until Google OAuth verification is approved.
+// Keep definitions, direct setup/management routes, and runtime access intact.
+// Remove this filter after approval; reviewer instances stay on their pinned build.
+const GOOGLE_CONNECTOR_SLUGS = new Set(
+  Object.values(GOOGLE_WORKSPACE_CONNECTOR_PROFILES).map((profile) => profile.appSlug),
+);
 
 function chatProviderForSlug(slug: string): ChatProvider | null {
   const method = getAppStoreDefinition(slug)?.methods.find(
@@ -250,7 +263,14 @@ function connectorAction(
     };
   }
   if (chatHref) return { label: "Connect", href: chatHref };
-  if (row.entry) return { label: "Connect", href: connectHrefFor(row.entry) };
+  // PAP-659 C4: the card's verb comes from the same four-state resolver the
+  // connect screen uses, so "Connect" never turns out to mean "paste a key".
+  if (row.entry) {
+    return {
+      label: connectionSetupVerbForApp(row.entry),
+      href: connectHrefFor(row.entry),
+    };
+  }
   return {
     label: "Connect",
     href: applicationId ? `/apps/app/${applicationId}/permissions` : null,
@@ -477,8 +497,18 @@ export function Browse({ renderAccountDetails = (connection) => connection.conne
 
     const customRows: ConnectorRowModel[] = [];
     for (const application of activeApplications) {
-      const appConnections =
+      const applicationSlug = appApplicationSourceSlug(application);
+      const savedAppConnections =
         connectionsByApplicationId.get(application.id) ?? [];
+      const appConnections = savedAppConnections.filter(
+        (connection) => !GOOGLE_CONNECTOR_SLUGS.has(appConnectionSourceSlug(connection) ?? ""),
+      );
+      // Hide source-only Google rows, but keep independently identified connectors.
+      if (
+        (!applicationSlug || applicationSlug === "link") &&
+        savedAppConnections.length > 0 &&
+        appConnections.length === 0
+      ) continue;
       const configuredConnectionSlug = appConnections
         .map(
           (connection) =>
@@ -500,7 +530,6 @@ export function Browse({ renderAccountDetails = (connection) => connection.conne
             : null,
         )
         .find((value): value is string => Boolean(value));
-      const applicationSlug = appApplicationSourceSlug(application);
       const resolvedSlug =
         applicationSlug &&
         applicationSlug !== "link" &&
@@ -568,6 +597,7 @@ export function Browse({ renderAccountDetails = (connection) => connection.conne
     }
 
     return [...rowsBySlug.values(), ...customRows]
+      .filter((row) => !GOOGLE_CONNECTOR_SLUGS.has(row.slug))
       .map((row) => ({
         ...row,
         connections: [...row.connections].sort(
