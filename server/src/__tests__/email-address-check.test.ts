@@ -26,7 +26,7 @@ beforeEach(() => {
   vi.resetAllMocks();
   mocks.credential.mockResolvedValue({ value: "private-key" });
   mocks.requireEnabled.mockResolvedValue(undefined);
-  vi.stubGlobal("fetch", vi.fn(async () => Response.json({ inbox_id: "ralph@agentmail.to" })));
+  vi.stubGlobal("fetch", vi.fn(async () => Response.json({ inboxes: [{ inbox_id: "ralph@agentmail.to" }] })));
 });
 afterEach(() => vi.unstubAllGlobals());
 describe("AgentMail address checks", () => {
@@ -49,6 +49,7 @@ describe("AgentMail address checks", () => {
     expect(response.body).toEqual({ address: "ralph@agentmail.to", status: "taken" });
     expect(response.headers["cache-control"]).toBe("no-store");
     expect(mocks.credential).toHaveBeenCalledWith(companyId, connectionId, expect.objectContaining({ userId: "board" }));
+    expect(fetch).toHaveBeenCalledWith("https://api.agentmail.to/v0/inboxes?limit=100", expect.objectContaining({ method: "GET" }));
     expect(response.text).not.toContain("private-key");
   });
   it.each([
