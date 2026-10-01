@@ -97,8 +97,8 @@ describe("AgentMail two-step setup", () => {
     await mount(false, true, "", `&resume=${requestId}`);
     await vi.waitFor(() => expect(button("Finish connecting").disabled).toBe(false));
     expect(mocks.inspect).toHaveBeenCalledWith("company", "original-account");
-    expect(container.querySelector<HTMLInputElement>("#email-name")?.value).toBe("reserved");
-    expect(container.querySelector<HTMLSelectElement>("#email-domain")?.value).toBe("paperclip.example");
+    expect(container.textContent).toContain("reserved@paperclip.example");
+    expect(container.querySelector("#email-name")).toBeNull();
     await click("Finish connecting");
     expect(mocks.setup).toHaveBeenCalledWith("company", expect.objectContaining({
       idempotencyKey: requestId, credentialConnectionId: "original-account", inboxId: "reserved@paperclip.example",
@@ -209,7 +209,7 @@ describe("AgentMail two-step setup", () => {
     mocks.inspect.mockResolvedValue({ scope: { scope_type: "inbox" }, inboxes: [{ inbox_id: "locked@agentmail.to" }], domains: [] });
     mocks.listInboxes.mockResolvedValue([{ id: requestId, assignedAgentId: "ralph", address: "locked@agentmail.to", status: "error" }]);
     await mount();
-    await vi.waitFor(() => expect(container.textContent).toContain("This address is reserved for Ralph"));
+    await vi.waitFor(() => expect(container.textContent).toContain("This address was created in AgentMail"));
     expect(container.textContent).not.toContain("Change AgentMail account");
     await click("Finish connecting");
     await vi.waitFor(() => expect(mocks.setup).toHaveBeenCalledWith("company", expect.objectContaining({
@@ -491,8 +491,9 @@ describe("AgentMail two-step setup", () => {
     await mount();
     await vi.waitFor(() => expect(button("Finish connecting").disabled).toBe(false));
     expect(container.querySelector("#email-address-error")).toBeNull();
-    if (addressMode === "new") expect(container.querySelector<HTMLInputElement>("#email-name")?.readOnly).toBe(true);
-    else expect(container.querySelector<HTMLSelectElement>("#email-existing")?.disabled).toBe(true);
+    expect(container.textContent).toContain(endpoint.address);
+    expect(container.querySelector("#email-name")).toBeNull();
+    expect(container.querySelector("#email-existing")).toBeNull();
     await click("Back");
     expect(container.querySelector<HTMLButtonElement>('#email-agent')?.disabled).toBe(true);
     await click("Continue");
@@ -500,6 +501,32 @@ describe("AgentMail two-step setup", () => {
     await click("Finish connecting");
     await vi.waitFor(() => expect(container.textContent).toContain("Your agent’s email is ready"));
     expect(mocks.setup).toHaveBeenLastCalledWith("company", expect.objectContaining({ inboxId: endpoint.address, assignedAgentId: "ralph", idempotencyKey: requestId }));
+  });
+
+  it("lets a failed setup choose another address without deleting or reusing its allocated inbox", async () => {
+    const requestId = crypto.randomUUID();
+    const draftKey = "paperclip.agentmail-setup:company:account:ralph";
+    sessionStorage.setItem(draftKey, JSON.stringify({ connectionId: "account", agentId: "ralph", step: 1, requestId }));
+    mocks.listInboxes.mockResolvedValue([{ id: requestId, assignedAgentId: "ralph", address: "reserved@paperclip.example", status: "draft" }]);
+    mocks.inspect.mockResolvedValue({ scope: { scope_type: "organization" }, inboxes: [{ inbox_id: "reserved@paperclip.example" }], domains: [{ domain_id: "custom", domain: "paperclip.example", status: "VERIFIED" }] });
+    await mount();
+    await vi.waitFor(() => expect(button("Finish connecting").disabled).toBe(false));
+    await click("Choose a different address");
+    expect(container.querySelector<HTMLInputElement>("#email-name")?.readOnly).toBe(false);
+    expect(container.querySelector<HTMLSelectElement>("#email-domain")?.disabled).toBe(false);
+    expect(container.querySelector<HTMLSelectElement>("#email-domain")?.value).toBe("paperclip.example");
+    await fill("#email-name", "another-address");
+    const nextRequestId = JSON.parse(sessionStorage.getItem(draftKey)!).requestId;
+    expect(nextRequestId).not.toBe(requestId);
+    await act(async () => root.unmount());
+    client.clear();
+    root = createRoot(container);
+    await mount();
+    await click("Create email address");
+    expect(mocks.setup).toHaveBeenLastCalledWith("company", expect.objectContaining({
+      username: "another-address", domain: "paperclip.example", idempotencyKey: nextRequestId,
+    }));
+    expect(mocks.control).not.toHaveBeenCalled();
   });
 
   it("does not treat another setup's allocated address as its own retry", async () => {

@@ -14,6 +14,7 @@ import { emailConnectionService } from "../services/email-connections.js";
 import { accessService } from "../services/access.js";
 import { badRequest, forbidden, HttpError, notFound } from "../errors.js";
 import { agentmailApi, AgentmailApiError } from "../services/agentmail-api.js";
+import { logger } from "../middleware/logger.js";
 import type {
   EmailChannelService,
   EmailActor,
@@ -32,6 +33,7 @@ function actor(req: Request): EmailActor {
 // Only local messages and operation names reach the UI; never forward a body.
 const agentmailErrorHandler: ErrorRequestHandler = (error, _req, res, next) => {
   if (!(error instanceof AgentmailApiError)) return next(error);
+  logger.warn({ operation: error.operation, providerStatus: error.status, providerCode: error.providerCode }, "AgentMail request rejected");
   const actions: Partial<Record<AgentmailApiError["operation"], string>> = {
     request: "complete this request",
     inspect_key: "verify the API key",
@@ -65,7 +67,9 @@ const agentmailErrorHandler: ErrorRequestHandler = (error, _req, res, next) => {
   } else if ([400, 409, 422].includes(error.status) && error.operation === "create_inbox") {
     message = "AgentMail could not create this email address. Try a different address and check that its domain is available in your AgentMail account.";
   } else if (error.status === 404) {
-    message = "AgentMail could not find the requested inbox or resource. Check that it still exists and that your API key can access it.";
+    message = error.operation === "create_inbox_key"
+      ? "AgentMail could not create an access key for this inbox. The email address was saved; try finishing the connection again."
+      : "AgentMail could not find the requested inbox or resource. Check that it still exists and that your API key can access it.";
   } else if (error.status >= 500) {
     status = 502;
     message = "AgentMail is temporarily unavailable. Try again in a moment.";

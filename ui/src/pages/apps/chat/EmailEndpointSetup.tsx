@@ -286,6 +286,18 @@ function EmailEndpointSetupForm({ companyId }: { companyId: string }) {
   const openTrust = () => { if (chosen) { setPermissions(chosen.permissions); setTrustOpen(true); } };
   const leave = () => navigate(`/apps/chat/${setup.data?.id ?? pendingEndpoint?.id}/settings`);
   const cancel = () => { try { sessionStorage.removeItem(draftKey); } catch {} navigate("/apps"); };
+  const chooseAnotherAddress = () => {
+    // Preserve the allocated inbox and its resumable setup. A different address
+    // must use a new provider client_id, never silently rename a retry.
+    setRequestId(crypto.randomUUID());
+    setAddressMode("new");
+    setUsername("");
+    setInboxId("");
+    setDomainSelected(true);
+    if (pendingAddress) setDomain(pendingAddress.slice(pendingAddress.lastIndexOf("@") + 1));
+    setup.reset();
+    connect.reset();
+  };
   return <div className="mx-auto max-w-xl space-y-6 p-6">
     <header className="space-y-2">
       <h1 className="text-xl font-bold">{step === 2 ? "Your agent’s email is ready" : "Give an agent an email address"}</h1>
@@ -327,14 +339,18 @@ function EmailEndpointSetupForm({ companyId }: { companyId: string }) {
     {step === 1 && <form className="space-y-6" onSubmit={event => { event.preventDefault(); if (canCreate) setup.mutate(); }}>
       <div className="space-y-2">
         <Label htmlFor={addressMode === "new" ? "email-name" : "email-existing"}>{chosen?.name}’s email address</Label>
-        {addressMode === "new" ? <>
+        {pendingAddress ? <>
+          <p className="text-sm font-medium">{pendingAddress}</p>
+          <p className="text-sm text-muted-foreground">This address was created in AgentMail. Finish connecting it to {chosen?.name}{scopedKey ? "." : ", or choose a different address. The original inbox will stay in AgentMail."}</p>
+          {!scopedKey && <Button type="button" variant="link" size="sm" className="h-auto p-0" disabled={busy} onClick={chooseAnotherAddress}>Choose a different address</Button>}
+        </> : addressMode === "new" ? <>
           <div className="flex items-center gap-2">
-            <Input id="email-name" className="min-w-0" value={pendingAddress ? pendingAddress.slice(0, pendingAddress.lastIndexOf("@")) : username} maxLength={64} autoComplete="off" spellCheck={false} disabled={busy} readOnly={!!pendingAddress}
+            <Input id="email-name" className="min-w-0" value={username} maxLength={64} autoComplete="off" spellCheck={false} disabled={busy}
               aria-invalid={!!addressError} aria-describedby={addressError ? "email-address-error" : "email-address-status"}
               onChange={event => { setUsername(event.target.value.toLowerCase()); setup.reset(); }} />
-            <select id="email-domain" aria-label="Email domain" className={`${selectClass} max-w-1/2 shrink-0`} value={pendingAddress ? pendingAddress.slice(pendingAddress.lastIndexOf("@") + 1) : domain}
-              disabled={busy || !!pendingAddress || !inspected.data} onChange={event => { setDomainSelected(true); setDomain(event.target.value); setup.reset(); }}>
-              {[...new Set([...customDomains, "agentmail.to", domain, ...(pendingAddress ? [pendingAddress.slice(pendingAddress.lastIndexOf("@") + 1)] : [])])]
+            <select id="email-domain" aria-label="Email domain" className={`${selectClass} max-w-1/2 shrink-0`} value={domain}
+              disabled={busy || !inspected.data} onChange={event => { setDomainSelected(true); setDomain(event.target.value); setup.reset(); }}>
+              {[...new Set([...customDomains, "agentmail.to", domain])]
                 .map(value => <option key={value} value={value}>@{value}</option>)}
             </select>
           </div>
@@ -347,7 +363,6 @@ function EmailEndpointSetupForm({ companyId }: { companyId: string }) {
             return <option key={i.inbox_id} value={i.inbox_id} disabled={assigned}>{i.inbox_id}{assigned ? " — already assigned" : ""}</option>;
           })}
         </select>}
-        {pendingAddress && <p className="text-sm text-muted-foreground">This address is reserved for {chosen?.name}. Continue to finish connecting it.</p>}
         {scopedKey && !pendingAddress && <Button type="button" variant="link" size="sm" className="h-auto p-0" disabled={busy}
           onClick={() => { setAllowInboxKey(false); setStep(0); }}>Choose a key for a new address</Button>}
         {addressError && <p id="email-address-error" role="alert" className="text-sm text-destructive">{addressError}</p>}

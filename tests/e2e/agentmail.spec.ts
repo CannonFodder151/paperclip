@@ -247,9 +247,9 @@ test("AgentMail setup and email work through the normal task conversation", asyn
   await page.screenshot({ path: test.info().outputPath("agentmail-permission-denied.png"), fullPage: true });
   await page.getByRole("link", { name: "Connectors", exact: true }).click();
   await page.getByRole("button", { name: "Finish setup", exact: true }).click();
-  await expect(addressField).toHaveValue("mail-agent-free");
-  await expect(addressField).not.toBeEditable();
-  await expect(page.getByLabel("Email domain", { exact: true })).toHaveValue("verified.example.test");
+  await expect(page.getByText("mail-agent-free@verified.example.test", { exact: true })).toBeVisible();
+  await expect(addressField).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Choose a different address", exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Finish connecting", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Your agent’s email is ready" })).toBeVisible();
   expect(setupRequests.map(input => input.username)).toEqual(["mail-agent", "mail-agent-free", undefined]);

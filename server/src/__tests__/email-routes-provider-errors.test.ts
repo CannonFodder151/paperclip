@@ -32,6 +32,14 @@ function app(setup: () => Promise<unknown>) {
 }
 
 describe("AgentMail provider errors at the HTTP boundary", () => {
+  it("explains a key-creation 404 without claiming the allocated address is missing", async () => {
+    const api = agentmailApi("private-api-key", vi.fn(async () => Response.json({ code: "not_found" }, { status: 404 })));
+    const response = await request(app(() => api.createInboxKey("ralph@agentmail.to")))
+      .post(setupPath).send(setupInput).expect(422);
+    expect(response.body.error).toBe("AgentMail could not create an access key for this inbox. The email address was saved; try finishing the connection again.");
+    expect(response.body.details).toMatchObject({ providerStatus: 404, operation: "create_inbox_key" });
+  });
+
   it.each(["resource_taken", "already_exists"])("identifies %s on inbox creation even when AgentMail returns 403", async (code) => {
     const api = agentmailApi("private-api-key", vi.fn(async () => Response.json({
       code, message: "private provider message", fix: "private-api-key", docs: "https://untrusted.invalid",

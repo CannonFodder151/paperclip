@@ -21,6 +21,11 @@ address already allocated before a later provider failure. Cancel and Done
 return to Connectors; Email settings opens the inbox settings. The email step
 groups the task/thread explanation under **How it Works**.
 
+After allocation, the address is shown as text with **Finish connecting**.
+**Choose a different address** restores the editable name and domain fields with
+a new setup identity. The previous inbox stays in AgentMail, and its draft can
+still be resumed from Connectors. Retrying never silently creates a replacement.
+
 Get API keys from [AgentMail's API-key page](https://console.agentmail.to/dashboard/api-keys).
 When an agent requests AgentMail in a chat or task, an inline card asks only for
 the key. It defaults to company-wide human access and this agent only, then
