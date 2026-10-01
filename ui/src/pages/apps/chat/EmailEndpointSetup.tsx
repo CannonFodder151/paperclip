@@ -104,7 +104,7 @@ function EmailEndpointSetupForm({ companyId }: { companyId: string }) {
   const [selectedCredentialId, setSelectedCredentialId] = useState<string | null>(draft.selectedCredentialId !== undefined ? draft.selectedCredentialId : connectionId || null);
   const [restrictedInbox, setRestrictedInbox] = useState("");
   const [allowInboxKey, setAllowInboxKey] = useState(draft.allowInboxKey ?? false);
-  const [requestId, setRequestId] = useState(() => draft.requestId ?? resumeId ?? (setupId && isUuidLike(setupId) ? setupId : crypto.randomUUID()));
+  const [requestId] = useState(() => draft.requestId ?? resumeId ?? (setupId && isUuidLike(setupId) ? setupId : crypto.randomUUID()));
   const [addressMode, setAddressMode] = useState<"new" | "existing">(draft.addressMode ?? "new");
   const [inboxId, setInboxId] = useState(draft.inboxId ?? "");
   const [username, setUsername] = useState(draft.username ?? "");
@@ -195,14 +195,7 @@ function EmailEndpointSetupForm({ companyId }: { companyId: string }) {
         return false;
       }
       const changingAccount = !!connectionId && selectedCredentialId !== connectionId;
-      if (changingAccount && pendingEndpoint) {
-        // A failed attempt can own an empty draft. Retire it before changing the
-        // request identity, while the same actor still has access to the draft.
-        await emailApi.control(pendingEndpoint.id, "remove");
-        await cache.invalidateQueries({ queryKey: ["email-inboxes", companyId] });
-      }
       const nextRequestId = changingAccount ? crypto.randomUUID() : requestId;
-      if (changingAccount) { setRequestId(nextRequestId); setConnectionId(""); }
       let id = selectedCredentialId;
       if (!id) {
         const result = await emailApi.connect(companyId, {
@@ -212,14 +205,30 @@ function EmailEndpointSetupForm({ companyId }: { companyId: string }) {
         id = result.id;
       }
       cache.setQueryData(["email-credential-inspect", companyId, id], details);
-      setConnectionId(id);
       setSelectedCredentialId(id);
       setApiKey("");
+      void cache.invalidateQueries({ queryKey: ["email-credentials", companyId] });
+      void cache.invalidateQueries({ queryKey: queryKeys.tools.connections(companyId) });
+      if (changingAccount) {
+        // Save the replacement credential before retiring the original draft.
+        // A failed save/cleanup leaves the original URL recoverable; a completed
+        // switch gets its own URL so refreshing cannot revive an archived draft.
+        if (pendingEndpoint) {
+          await emailApi.control(pendingEndpoint.id, "remove");
+          await cache.invalidateQueries({ queryKey: ["email-inboxes", companyId] });
+        }
+        openDraft({
+          connectionId: id, selectedCredentialId: id, agentId, step: 1,
+          requestId: nextRequestId, addressMode: details.scope.scope_type === "inbox" ? "existing" : "new",
+          inboxId: details.scope.scope_type === "inbox" ? details.inboxes[0]?.inbox_id ?? "" : "",
+          username, domain: "agentmail.to", domainSelected: false, takenAddresses: [], mode, allowInboxKey,
+        });
+        return false;
+      }
+      setConnectionId(id);
       setRestrictedInbox("");
       setAddressMode(details.scope.scope_type === "inbox" ? "existing" : "new");
       if (details.scope.scope_type === "inbox") setInboxId(details.inboxes[0]?.inbox_id ?? "");
-      void cache.invalidateQueries({ queryKey: ["email-credentials", companyId] });
-      void cache.invalidateQueries({ queryKey: queryKeys.tools.connections(companyId) });
       return true;
     },
     onSuccess: ready => { if (ready) setStep(1); },
@@ -291,20 +300,22 @@ function EmailEndpointSetupForm({ companyId }: { companyId: string }) {
   const openTrust = () => { if (chosen) { setPermissions(chosen.permissions); setTrustOpen(true); } };
   const leave = () => navigate(`/apps/chat/${setup.data?.id ?? pendingEndpoint?.id}/settings`);
   const cancel = () => { try { sessionStorage.removeItem(draftKey); } catch {} navigate("/apps"); };
+  function openDraft(nextDraft: EmailSetupDraft & { requestId: string; connectionId: string }) {
+    try {
+      sessionStorage.setItem(`paperclip.agentmail-setup:${companyId}:${nextDraft.requestId}:${agentId}`, JSON.stringify(nextDraft));
+    } catch { /* The new link still restores the agent and saved account. */ }
+    navigate(`/apps/chat/connect?${new URLSearchParams({ provider: "agentmail", purpose: "chat", setupId: nextDraft.requestId, agentId, connectionId: nextDraft.connectionId })}`);
+  }
   const chooseAnotherAddress = () => {
     // Preserve the allocated inbox and its resumable setup. A different address
     // must use a new provider client_id, never silently rename a retry.
     const nextRequestId = crypto.randomUUID();
-    const nextDraft: EmailSetupDraft = {
+    openDraft({
       connectionId, selectedCredentialId: connectionId, agentId, step: 1,
       requestId: nextRequestId, addressMode: "new", username: "", inboxId: "",
       domain: pendingAddress?.slice(pendingAddress.lastIndexOf("@") + 1) ?? domain,
       domainSelected: true, takenAddresses, mode, allowInboxKey: false,
-    };
-    try {
-      sessionStorage.setItem(`paperclip.agentmail-setup:${companyId}:${nextRequestId}:${agentId}`, JSON.stringify(nextDraft));
-    } catch { /* The new link still restores the agent and saved account. */ }
-    navigate(`/apps/chat/connect?${new URLSearchParams({ provider: "agentmail", purpose: "chat", setupId: nextRequestId, agentId, connectionId })}`);
+    });
   };
   return <div className="mx-auto max-w-xl space-y-6 p-6">
     <header className="space-y-2">

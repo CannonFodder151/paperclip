@@ -18,9 +18,11 @@ const navigateMock = vi.hoisted(() => vi.fn());
 const setBreadcrumbsMock = vi.hoisted(() => vi.fn());
 const experimentalMock = vi.hoisted(() => vi.fn());
 const chatSetupMock = vi.hoisted(() => vi.fn());
+const emailControlMock = vi.hoisted(() => vi.fn());
 const chatListMock = vi.hoisted(() => vi.fn());
 vi.mock("@/api/instanceSettings", () => ({ instanceSettingsApi: { getExperimental: experimentalMock } }));
 vi.mock("@/api/chatEndpoints", () => ({ chatEndpointsApi: { list: chatListMock, setup: chatSetupMock } }));
+vi.mock("@/api/email", () => ({ emailApi: { control: emailControlMock } }));
 
 vi.mock("@/api/tools", () => ({
   toolsApi: {
@@ -137,6 +139,7 @@ describe("Connectors landing page", () => {
     experimentalMock.mockResolvedValue({ enableChatConnectors: true });
     chatListMock.mockResolvedValue([]);
     chatSetupMock.mockReset().mockResolvedValue({ status: "archived" });
+    emailControlMock.mockReset().mockResolvedValue({ status: "archived" });
     listGalleryMock.mockResolvedValue({
       apps: [
         galleryEntry({
@@ -678,23 +681,34 @@ describe("Connectors landing page", () => {
     },
   );
 
-  it.each(["active", "draft"])("confirms chat removal for %s connections and refreshes the list", async (status) => {
-    chatListMock.mockResolvedValue([{ id: "chat-1", provider: "slack", status, assignedAgentName: "CEO" }]);
+  it.each([
+    ["slack", "Slack", "active"], ["slack", "Slack", "draft"],
+    ["agentmail", "AgentMail", "active"], ["agentmail", "AgentMail", "draft"],
+  ])("confirms %s removal for %s %s connections and refreshes the list", async (provider, providerName, status) => {
+    chatListMock.mockResolvedValue([{ id: "chat-1", provider, status, assignedAgentName: "CEO" }]);
     const client = await renderBrowse();
     const invalidate = vi.spyOn(client, "invalidateQueries");
-    await act(() => void container.querySelector('button[aria-label="Manage CEO Slack connection"]')!.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true })));
+    await act(() => void container.querySelector(`button[aria-label="Manage CEO ${providerName} connection"]`)!.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true })));
     await flushReact();
     const remove = Array.from(document.querySelectorAll<HTMLElement>('[role="menuitem"]')).find((item) => item.textContent?.trim() === "Remove connection");
     await act(() => remove!.click());
     await flushReact();
     expect(chatSetupMock).not.toHaveBeenCalled();
+    expect(emailControlMock).not.toHaveBeenCalled();
     expect(document.body.textContent).toContain("Existing Paperclip tasks and conversation history remain available.");
     chatListMock.mockResolvedValue([]);
     await act(() => Array.from(document.querySelectorAll("button")).find((button) => button.textContent?.trim() === "Remove connection")!.click());
     await flushReact();
-    expect(chatSetupMock).toHaveBeenCalledWith("chat-1", { action: "remove" });
+    if (provider === "agentmail") {
+      expect(emailControlMock).toHaveBeenCalledWith("chat-1", "remove");
+      expect(chatSetupMock).not.toHaveBeenCalled();
+    } else {
+      expect(chatSetupMock).toHaveBeenCalledWith("chat-1", { action: "remove" });
+      expect(emailControlMock).not.toHaveBeenCalled();
+    }
     expect(archiveConnectionMock).not.toHaveBeenCalled();
     expect(invalidate).toHaveBeenCalledWith({ queryKey: queryKeys.chatEndpoints.list("company-1") });
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ["email-inboxes", "company-1"] });
     expect(container.textContent).not.toContain("CEO");
   });
 

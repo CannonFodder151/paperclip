@@ -38,6 +38,7 @@ import { useBreadcrumbs } from "@/context/BreadcrumbContext";
 import { useToast } from "@/context/ToastContext";
 import { queryKeys } from "@/lib/queryKeys";
 import { toolsApi } from "@/api/tools";
+import { emailApi } from "@/api/email";
 import {
   chatEndpointsApi,
   type ChatEndpoint,
@@ -109,13 +110,11 @@ type ConnectionState = {
 };
 
 type ConnectionRemovalTarget = {
-  kind?: "chat";
   id: string;
   accountName: string;
   providerName: string;
   remainingConnectionCount: number;
-
-};
+} & ({ kind: "chat"; provider: ChatProvider } | { kind?: undefined });
 
 // Temporary, page-only hold until Google OAuth verification is approved.
 // Keep definitions, direct setup/management routes, and runtime access intact.
@@ -343,12 +342,17 @@ export function Browse({ renderAccountDetails = (connection) => connection.conne
   const removeConnection = useMutation({
     mutationFn: async (target: ConnectionRemovalTarget) => {
       if (target.kind === "chat") {
-        await chatEndpointsApi.setup(target.id, { action: "remove" });
+        if (target.provider === "agentmail") {
+          await emailApi.control(target.id, "remove");
+        } else {
+          await chatEndpointsApi.setup(target.id, { action: "remove" });
+        }
       } else {
         await toolsApi.archiveConnection(target.id);
       }
     },
     onSuccess: (_connection, target) => {
+      queryClient.invalidateQueries({ queryKey: ["email-inboxes", selectedCompanyId!] });
       queryClient.invalidateQueries({
         queryKey: queryKeys.chatEndpoints.list(selectedCompanyId!),
       });
@@ -933,6 +937,7 @@ export function ConnectorCard({
                       variant="destructive"
                       onSelect={() => onRequestRemove({
                         kind: "chat",
+                        provider: endpoint.provider,
                         id: endpoint.id,
                         accountName: `${endpoint.assignedAgentName} · ${row.name}`,
                         providerName: row.name,

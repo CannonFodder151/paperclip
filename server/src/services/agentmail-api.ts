@@ -285,16 +285,16 @@ export function agentmailApi(apiKey: string, fetchImpl: typeof fetch = fetch) {
     whoami: () => request<AgentmailScope>("/auth/me"),
     getInbox: (id: string) => request<AgentmailInbox>(inboxPath(id)),
     checkAddress: async (address: string): Promise<EmailAddressCheckResult> => {
-      try {
-        await request<AgentmailInbox>(inboxPath(address));
-        return { address, status: "taken" };
-      } catch (error) {
-        // https://docs.agentmail.to/errors#not_found: 404 also hides inboxes
-        // outside this credential's scope. Never claim these addresses are free.
-        if (error instanceof AgentmailApiError && error.status === 404)
-          return { address, status: "unknown" };
-        throw error;
-      }
+      // Do not GET a speculative inbox ID. Live AgentMail caches missing inbox
+      // lookups, so checking a free name can make key creation return 404 after
+      // the inbox is created. Listing avoids priming that negative lookup.
+      const { inboxes } = await request<{ inboxes: AgentmailInbox[] }>("/inboxes?limit=100");
+      // An absent entry can be outside this page or credential's scope. Only
+      // creation is authoritative; never claim an unlisted address is free.
+      return {
+        address,
+        status: inboxes.some(inbox => inbox.inbox_id.toLowerCase() === address.toLowerCase()) ? "taken" : "unknown",
+      };
     },
     listInboxes: () =>
       request<{ inboxes: AgentmailInbox[] }>("/inboxes?limit=100"),

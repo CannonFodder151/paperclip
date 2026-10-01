@@ -25,6 +25,8 @@ After allocation, the address is shown as text with **Finish connecting**.
 **Choose a different address** restores the editable name and domain fields with
 a new setup identity. The previous inbox stays in AgentMail, and its draft can
 still be resumed from Connectors. Retrying never silently creates a replacement.
+Changing accounts also opens a new setup URL after saving the replacement key
+and retiring the empty draft, so refresh preserves the new account and request.
 
 Get API keys from [AgentMail's API-key page](https://console.agentmail.to/dashboard/api-keys).
 When an agent requests AgentMail in a chat or task, an inline card asks only for
@@ -61,6 +63,14 @@ Verified custom domains are selectable after checking the API key. Complete DNS
 setup in [AgentMail](https://docs.agentmail.to/custom-domains). Paperclip does not
 register domains or manage DNS.
 
+Debounced address checks search the account's visible inbox list (up to 100
+entries), rather than requesting a not-yet-created inbox by ID. Live testing
+found that AgentMail retains negative inbox lookups: an address checked before
+creation could return 404 during access-key creation even after the inbox was
+created successfully. Listing avoids this failure. A match is taken; absence is
+unknown because the address may be outside the returned page or credential scope.
+Final creation still handles global address conflicts.
+
 Failed provider requests retain their HTTP status, a fixed operation name, and
 an allowlisted [AgentMail error code](https://docs.agentmail.to/errors). For
 example, `create_inbox` with `missing_permission` differs from `limit_exceeded`.
@@ -87,6 +97,9 @@ An explicitly configured workspace strategy still applies and must be usable.
 Removing the assigned agent’s saved-connection access or revoking its credential
 grant stops receiving and sending. Connection creation saves the vaulted binding,
 human grants, and agent access in one database transaction.
+The catalog's **Remove connection** action uses the email inbox control API for
+AgentMail, including unfinished drafts. It preserves provider inboxes and task
+history while disconnecting Paperclip and removing its owned runtime credentials.
 
 ## Receiving and task lifecycle
 

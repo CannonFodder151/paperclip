@@ -250,9 +250,10 @@ describe("AgentMail two-step setup", () => {
     const replacementRequest = mocks.connect.mock.calls[0][1];
     expect(replacementRequest).toMatchObject({ apiKey: "replacement-secret", agentIds: ["ralph"], grantKind: "organization", allAgents: false });
     expect(replacementRequest.idempotencyKey).not.toBe(originalRequestId);
+    const nextSearch = container.querySelector('[data-testid="location"]')!.getAttribute("data-search")!;
     await act(async () => root.unmount());
     client.clear(); root = createRoot(container);
-    await mount();
+    await mount(false, true, "ralph", nextSearch.replace(/^\?/, "&"));
     await click("Create email address");
     await vi.waitFor(() => expect(mocks.setup).toHaveBeenCalledWith("company", expect.objectContaining({
       credentialConnectionId: "replacement-account", idempotencyKey: replacementRequest.idempotencyKey, username: "ralph",
@@ -260,9 +261,10 @@ describe("AgentMail two-step setup", () => {
     expect(mocks.connect).toHaveBeenCalledTimes(1);
   });
 
-  it.each([false, true])("retires an unallocated draft before switching and stops if cleanup fails (%s)", async cleanupFails => {
+  it.each([false, true])("preserves an account switch from a resumed unallocated draft across refresh (%s cleanup failure)", async cleanupFails => {
     const requestId = crypto.randomUUID();
-    sessionStorage.setItem("paperclip.agentmail-setup:company:account:ralph", JSON.stringify({
+    const draftKey = `paperclip.agentmail-setup:company:${requestId}:ralph`;
+    sessionStorage.setItem(draftKey, JSON.stringify({
       connectionId: "account", agentId: "ralph", step: 1, requestId,
     }));
     mocks.listInboxes.mockResolvedValue([{ id: requestId, assignedAgentId: "ralph", address: null, status: "draft" }]);
@@ -272,20 +274,29 @@ describe("AgentMail two-step setup", () => {
       if (cleanupFails) throw new Error("Draft cleanup failed");
       mocks.listInboxes.mockResolvedValue([]);
     });
-    await mount();
+    await mount(true, true, "ralph", `&resume=${requestId}`);
     await vi.waitFor(() => expect(container.textContent).toContain("That key only connects"));
     await fill('input[type="password"]', "new-account-key");
     await click("Continue");
     await vi.waitFor(() => expect(mocks.control).toHaveBeenCalledWith(requestId, "remove"));
     if (cleanupFails) {
       await vi.waitFor(() => expect(container.textContent).toContain("Draft cleanup failed"));
-      expect(mocks.connect).not.toHaveBeenCalled();
-      expect(JSON.parse(sessionStorage.getItem("paperclip.agentmail-setup:company:account:ralph")!).requestId).toBe(requestId);
+      expect(mocks.connect).toHaveBeenCalledTimes(1);
+      expect(JSON.parse(sessionStorage.getItem(draftKey)!).requestId).toBe(requestId);
+      expect(container.querySelector('[data-testid="location"]')!.getAttribute("data-search")).toContain(`resume=${requestId}`);
       return;
     }
     await vi.waitFor(() => expect(container.querySelector("#email-name")).not.toBeNull());
-    expect(mocks.control.mock.invocationCallOrder[0]).toBeLessThan(mocks.connect.mock.invocationCallOrder[0]);
-    expect(mocks.connect.mock.calls[0][1].idempotencyKey).not.toBe(requestId);
+    expect(mocks.connect.mock.invocationCallOrder[0]).toBeLessThan(mocks.control.mock.invocationCallOrder[0]);
+    const nextSearch = container.querySelector('[data-testid="location"]')!.getAttribute("data-search")!;
+    const nextId = new URLSearchParams(nextSearch).get("setupId")!;
+    expect(nextId).not.toBe(requestId);
+    expect(nextSearch).not.toContain("resume=");
+    await act(async () => root.unmount());
+    client.clear(); root = createRoot(container);
+    await mount(false, true, "ralph", nextSearch.replace(/^\?/, "&"));
+    await click("Create email address");
+    expect(mocks.setup).toHaveBeenCalledWith("company", expect.objectContaining({ credentialConnectionId: "replacement", idempotencyKey: nextId, username: "ralph" }));
   });
 
   it("checks the initial address and debounces edits while ignoring stale responses", async () => {
