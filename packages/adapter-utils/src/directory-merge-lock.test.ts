@@ -10,7 +10,13 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { withDirectoryMergeLock, WORKSPACE_RESTORE_LOCK_TIMEOUT_CODE } from "./workspace-restore-merge.js";
 
 describe("directory merge lock process lifetime", () => {
-  const loader = fileURLToPath(new URL("../../../cli/node_modules/tsx/dist/cli.mjs", import.meta.url));
+  // Load tsx as an --import hook, not tsx's own CLI entry point. The CLI entry
+  // point re-spawns the evaluated code in a further child process, so killing
+  // the process this file spawns would leave that further child as an orphan
+  // that still holds the lock. The --import hook runs the evaluated code in
+  // the process this file spawns directly, so killing it really does release
+  // the lock.
+  const loader = fileURLToPath(new URL("../../../cli/node_modules/tsx/dist/loader.mjs", import.meta.url));
   const module = fileURLToPath(new URL("./workspace-restore-merge.ts", import.meta.url));
   const directories: string[] = [];
   const children: ChildProcess[] = [];
@@ -38,7 +44,7 @@ describe("directory merge lock process lifetime", () => {
   }
 
   async function holder(target: string, env: NodeJS.ProcessEnv) {
-    const child = spawn(process.execPath, [loader, "--eval", `
+    const child = spawn(process.execPath, ["--import", loader, "--eval", `
       import { withDirectoryMergeLock } from ${JSON.stringify(module)};
       withDirectoryMergeLock(${JSON.stringify(target)}, async () => {
         process.send?.("locked");
@@ -77,10 +83,10 @@ describe("directory merge lock process lifetime", () => {
     const recordPath = await ownerPath(lock);
     const record = JSON.parse(await readFile(recordPath, "utf8"));
     await writeFile(recordPath, JSON.stringify({ ...record, pid: process.pid }));
-    const clock = expireWait();
-    try {
-      await expect(withDirectoryMergeLock(target, async () => "restored", env)).resolves.toBe("restored");
-    } finally { clock.mockRestore(); }
+    // This test asserts a successful acquisition, so it keeps the real wait
+    // budget instead of an expired clock: it must let the implementation's
+    // own retry loop absorb ordinary scheduling jitter around the crash.
+    await expect(withDirectoryMergeLock(target, async () => "restored", env)).resolves.toBe("restored");
   }, 15_000);
 
   it("protects a live holder in another process regardless of diagnostic PID or age", async () => {
@@ -115,7 +121,7 @@ describe("directory merge lock process lifetime", () => {
       } finally { clock.mockRestore(); }
       // A same-process test alone cannot prove that the OS lock survived: on
       // POSIX, closing an unmanaged descriptor can drop process-wide locks.
-      const result = await promisify(execFile)(process.execPath, [loader, "--eval", `
+      const result = await promisify(execFile)(process.execPath, ["--import", loader, "--eval", `
         import { withDirectoryMergeLock, WORKSPACE_RESTORE_LOCK_TIMEOUT_CODE } from ${JSON.stringify(module)};
         const now = Date.now();
         let calls = 0;
