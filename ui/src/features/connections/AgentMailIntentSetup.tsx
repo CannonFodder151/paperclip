@@ -2,7 +2,7 @@ import { useState } from "react";
 import { useMutation } from "@tanstack/react-query";
 import { emailApi } from "@/api/email";
 import { Button } from "@/components/ui/button";
-import { AgentMailApiKeyField } from "./AgentMailApiKeyField";
+import { AgentMailCredentialField } from "./AgentMailCredentialField";
 
 /** Same account and inbox APIs as Apps; task setup fixes the access defaults. */
 export function AgentMailIntentSetup({ companyId, agentId, requestId, savedCredentialId, readyConnectionId, onComplete, onDecline, declining = false }: {
@@ -17,12 +17,13 @@ export function AgentMailIntentSetup({ companyId, agentId, requestId, savedCrede
 }) {
   const [apiKey, setApiKey] = useState("");
   const [credentialId, setCredentialId] = useState(savedCredentialId ?? null);
+  const [selectedCredentialId, setSelectedCredentialId] = useState<string | null>(null);
   const [inboxConnectionId, setInboxConnectionId] = useState(readyConnectionId ?? null);
   const setup = useMutation({
     mutationFn: async () => {
       let connectionId = inboxConnectionId;
       if (!connectionId) {
-        let accountId = credentialId;
+        let accountId = credentialId || selectedCredentialId;
         if (!accountId) {
           const account = await emailApi.connect(companyId, {
             apiKey: apiKey.trim(), grantKind: "organization", allAgents: false,
@@ -32,6 +33,7 @@ export function AgentMailIntentSetup({ companyId, agentId, requestId, savedCrede
           setCredentialId(accountId);
           setApiKey("");
         }
+        setCredentialId(accountId);
         const inbox = await emailApi.setup(companyId, {
           assignedAgentId: agentId, credentialConnectionId: accountId,
           receiveMode: "websocket", idempotencyKey: requestId,
@@ -50,11 +52,13 @@ export function AgentMailIntentSetup({ companyId, agentId, requestId, savedCrede
   }}>
     {credentialId || inboxConnectionId
       ? <p className="text-sm text-muted-foreground">{inboxConnectionId ? "Your inbox is ready. Continue to resume the chat." : "API key saved. Finish creating the inbox."}</p>
-      : <AgentMailApiKeyField value={apiKey} onChange={setApiKey} disabled={setup.isPending || declining} />}
+      : <AgentMailCredentialField companyId={companyId} connectionId={selectedCredentialId}
+          onConnectionChange={id => { setSelectedCredentialId(id); setApiKey(""); }}
+          value={apiKey} onChange={setApiKey} disabled={setup.isPending || declining} />}
     {setup.error && <p className="text-sm text-destructive" role="alert">{setup.error.message}</p>}
     <div className="flex items-center justify-between gap-2">
       <Button type="button" variant="ghost" disabled={setup.isPending || declining} onClick={onDecline}>Not now</Button>
-      <Button type="submit" disabled={setup.isPending || declining || (!credentialId && !inboxConnectionId && !apiKey.trim())}>
+      <Button type="submit" disabled={setup.isPending || declining || (!credentialId && !selectedCredentialId && !inboxConnectionId && !apiKey.trim())}>
         {setup.isPending ? "Connecting…" : inboxConnectionId ? "Continue" : credentialId ? "Finish setup" : "Connect AgentMail"}
       </Button>
     </div>

@@ -100,6 +100,14 @@ export function emailRoutes(db: Db, service: EmailChannelService) {
     )
       throw forbidden("Missing permission: tools:manage_connections");
   }
+  router.get("/companies/:companyId/email/connections", async (req, res) => {
+    const companyId = req.params.companyId as string;
+    await manager(req, companyId);
+    await service.requireEnabled();
+    res.set("Cache-Control", "no-store").json(
+      await emailConnectionService(db).listCredentials(companyId, actor(req)),
+    );
+  });
   router.post(
     "/companies/:companyId/email/connections",
     validate(emailConnectionSchema),

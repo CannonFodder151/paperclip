@@ -19,6 +19,7 @@ import { ConnectionIntentInteractionBody } from "./ConnectionIntentInteractionBo
 const emailConnectMock = vi.hoisted(() => vi.fn());
 const emailSetupMock = vi.hoisted(() => vi.fn());
 vi.mock("@/api/email", () => ({ emailApi: {
+  credentials: async () => [],
   connect: (...args: unknown[]) => emailConnectMock(...args),
   setup: (...args: unknown[]) => emailSetupMock(...args),
 } }));

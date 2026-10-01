@@ -1,5 +1,6 @@
 import { isUuidLike } from "@paperclipai/shared";
 import { ApiError } from "@/api/client";
+import { AgentMailCredentialField } from "@/features/connections/AgentMailCredentialField";
 import { AgentMailApiKeyField } from "@/features/connections/AgentMailApiKeyField";
 import { useEmailAddressCheck } from "@/features/connections/useEmailAddressCheck";
 import { ChatSetupNavigation } from "@/components/chat/ChatSetupNavigation";
@@ -22,9 +23,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Card, CardHeader, CardDescription } from "@/components/ui/card";
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
-import { AgentIcon } from "@/components/AgentIconPicker";
-import { SearchableSelect } from "@/components/SearchableSelect";
+import { AgentSelect } from "@/components/AgentMultiSelect";
 import { TrustPresetSection } from "@/components/TrustPresetSection";
 import { EmailSafetyNotice } from "@/components/EmailSafetyNotice";
 import {
@@ -41,7 +40,6 @@ import {
   lowTrustBoundaryHasScope,
 } from "@/lib/trust-policy-ui";
 import { queryKeys } from "@/lib/queryKeys";
-import { formatDateTime } from "@/lib/utils";
 import type {
   AgentPermissions,
   EmailEndpointSummary,
@@ -55,6 +53,7 @@ interface EmailSetupDraft {
   mode: "websocket" | "webhook";
   domainSelected: boolean;
   takenAddresses: string[];
+  allowInboxKey: boolean;
 }
 function readEmailSetupDraft(key: string): Partial<EmailSetupDraft> {
   try {
@@ -68,6 +67,7 @@ function readEmailSetupDraft(key: string): Partial<EmailSetupDraft> {
     if (typeof value.requestId === "string" && isUuidLike(value.requestId)) draft.requestId = value.requestId;
     if (value.addressMode === "new" || value.addressMode === "existing") draft.addressMode = value.addressMode;
     if (value.mode === "websocket" || value.mode === "webhook") draft.mode = value.mode;
+    if (typeof value.allowInboxKey === "boolean") draft.allowInboxKey = value.allowInboxKey;
     if (typeof value.domainSelected === "boolean") draft.domainSelected = value.domainSelected;
     if (Array.isArray(value.takenAddresses)) draft.takenAddresses = value.takenAddresses
       .filter((address: unknown): address is string => typeof address === "string" && address.length <= 320).slice(-20);
@@ -94,6 +94,9 @@ function EmailEndpointSetupForm({ companyId }: { companyId: string }) {
   const [step, setStep] = useState<0 | 1 | 2>(draft.step ?? (resumeId ? 1 : 0));
   const [agentId, setAgentId] = useState(draft.agentId ?? params.get("agentId") ?? "");
   const [apiKey, setApiKey] = useState("");
+  const [selectedCredentialId, setSelectedCredentialId] = useState<string | null>(connectionId || null);
+  const [restrictedInbox, setRestrictedInbox] = useState("");
+  const [allowInboxKey, setAllowInboxKey] = useState(draft.allowInboxKey ?? false);
   const [requestId, setRequestId] = useState(() => draft.requestId ?? resumeId ?? (setupId && isUuidLike(setupId) ? setupId : crypto.randomUUID()));
   const [addressMode, setAddressMode] = useState<"new" | "existing">(draft.addressMode ?? "new");
   const [inboxId, setInboxId] = useState(draft.inboxId ?? "");
@@ -103,10 +106,6 @@ function EmailEndpointSetupForm({ companyId }: { companyId: string }) {
   const [takenAddresses, setTakenAddresses] = useState<string[]>(draft.takenAddresses ?? []);
   const [mode, setMode] = useState<"websocket" | "webhook">(draft.mode ?? "websocket");
   const [trustOpen, setTrustOpen] = useState(false);
-  const [accountOpen, setAccountOpen] = useState(false);
-  const [replacementConnectionId, setReplacementConnectionId] = useState("");
-  const [replacementKey, setReplacementKey] = useState("");
-  const [replacementRequestId, setReplacementRequestId] = useState(() => crypto.randomUUID());
   const [permissions, setPermissions] = useState<Partial<AgentPermissions>>({});
   const suggestedUsername = useRef(false);
   useEffect(() => {
@@ -115,9 +114,9 @@ function EmailEndpointSetupForm({ companyId }: { companyId: string }) {
     try {
       if (step === 2) sessionStorage.removeItem(draftKey);
       else sessionStorage.setItem(draftKey, JSON.stringify({ connectionId, step, agentId,
-        requestId, addressMode, inboxId, username, domain, domainSelected, takenAddresses, mode }));
+        requestId, addressMode, inboxId, username, domain, domainSelected, takenAddresses, mode, allowInboxKey }));
     } catch { /* Setup remains usable when browser storage is unavailable. */ }
-  }, [companyId, draftKey, connectionId, step, agentId, requestId, addressMode, inboxId, username, domain, domainSelected, takenAddresses, mode]);
+  }, [companyId, draftKey, connectionId, step, agentId, requestId, addressMode, inboxId, username, domain, domainSelected, takenAddresses, mode, allowInboxKey]);
   const agents = useQuery({ queryKey: queryKeys.agents.list(companyId),
     queryFn: () => agentsApi.list(companyId), enabled: !!companyId });
   const projects = useQuery({ queryKey: queryKeys.projects.list(companyId),
@@ -161,11 +160,17 @@ function EmailEndpointSetupForm({ companyId }: { companyId: string }) {
     if (inspected.isSuccess && !domainSelected && !pendingAddress) setDomain(defaultDomain);
   }, [inspected.isSuccess, domainSelected, pendingAddress, defaultDomain]);
   useEffect(() => {
-    if (scopedKey) {
+    if (!scopedKey || !inboxes.isSuccess) return;
+    if (pendingAddress || allowInboxKey) {
       setAddressMode("existing");
       setInboxId(inspected.data?.inboxes[0]?.inbox_id ?? "");
+    } else if (step === 1) {
+      // Old drafts must recover at the key choice, not return to a locked form.
+      setRestrictedInbox(inspected.data?.inboxes[0]?.inbox_id ?? "this inbox");
+      setSelectedCredentialId(null);
+      setStep(0);
     }
-  }, [scopedKey, inspected.data]);
+  }, [scopedKey, inspected.data, inboxes.isSuccess, pendingAddress, allowInboxKey, step]);
   useEffect(() => {
     if (chosen && !suggestedUsername.current) {
       suggestedUsername.current = true;
@@ -174,57 +179,53 @@ function EmailEndpointSetupForm({ companyId }: { companyId: string }) {
   }, [chosen, username]);
   const connect = useMutation({
     mutationFn: async () => {
-      if (!connectionId) {
+      if (pendingAddress) return true;
+      const details = selectedCredentialId
+        ? await emailApi.inspectSaved(companyId, selectedCredentialId)
+        : await emailApi.inspect(companyId, apiKey.trim());
+      if (details.scope.scope_type === "inbox" && !allowInboxKey) {
+        setRestrictedInbox(details.inboxes[0]?.inbox_id ?? "this inbox");
+        return false;
+      }
+      const changingAccount = !!connectionId && selectedCredentialId !== connectionId;
+      if (changingAccount && pendingEndpoint) {
+        // A failed attempt can own an empty draft. Retire it before changing the
+        // request identity, while the same actor still has access to the draft.
+        await emailApi.control(pendingEndpoint.id, "remove");
+        await cache.invalidateQueries({ queryKey: ["email-inboxes", companyId] });
+      }
+      const nextRequestId = changingAccount ? crypto.randomUUID() : requestId;
+      if (changingAccount) { setRequestId(nextRequestId); setConnectionId(""); }
+      let id = selectedCredentialId;
+      if (!id) {
         const result = await emailApi.connect(companyId, {
           apiKey: apiKey.trim(), grantKind: "organization", allAgents: false,
-          agentIds: [agentId], idempotencyKey: requestId,
+          agentIds: [agentId], idempotencyKey: nextRequestId,
         });
-        setApiKey("");
-        setConnectionId(result.id);
-        void cache.invalidateQueries({ queryKey: queryKeys.tools.connections(companyId) });
+        id = result.id;
       }
-
-    },
-    onSuccess: () => setStep(1),
-  });
-  const savedAccounts = useQuery({
-    queryKey: queryKeys.tools.connections(companyId),
-    queryFn: () => toolsApi.listConnections(companyId),
-    enabled: accountOpen,
-  });
-  const otherAccounts = savedAccounts.data?.connections.filter(connection =>
-    connection.id !== connectionId && connection.status === "active" && connection.enabled
-    && connection.config?.provider === "agentmail" && connection.config.emailCredential);
-  const changeAccount = useMutation({
-    mutationFn: async () => {
-      if (pendingAddress) throw new Error("Finish connecting the reserved address before changing accounts.");
-      if (replacementConnectionId) {
-        // Verify this user can use the saved credential before switching drafts.
-        await emailApi.inspectSaved(companyId, replacementConnectionId);
-        return replacementConnectionId;
-      }
-      const connection = await emailApi.connect(companyId, {
-        apiKey: replacementKey.trim(), grantKind: "organization", allAgents: false,
-        agentIds: [agentId], idempotencyKey: replacementRequestId,
-      });
-      return connection.id;
-    },
-    onSuccess: id => {
+      cache.setQueryData(["email-credential-inspect", companyId, id], details);
       setConnectionId(id);
-      // A different key needs a new setup identity; reusing the old one would
-      // return the original credential from the connection idempotency lookup.
-      setRequestId(replacementRequestId);
-      setAddressMode("new");
-      setInboxId("");
-      setDomain("agentmail.to");
-      setDomainSelected(false);
-      setTakenAddresses([]);
-      setReplacementKey("");
-      setAccountOpen(false);
-      setup.reset();
+      setSelectedCredentialId(id);
+      setApiKey("");
+      setRestrictedInbox("");
+      setAddressMode(details.scope.scope_type === "inbox" ? "existing" : "new");
+      if (details.scope.scope_type === "inbox") setInboxId(details.inboxes[0]?.inbox_id ?? "");
+      void cache.invalidateQueries({ queryKey: ["email-credentials", companyId] });
       void cache.invalidateQueries({ queryKey: queryKeys.tools.connections(companyId) });
+      return true;
     },
+    onSuccess: ready => { if (ready) setStep(1); },
   });
+  function selectCredential(id: string) {
+    setSelectedCredentialId(id);
+    setApiKey("");
+    setRestrictedInbox("");
+    setAllowInboxKey(false);
+    setDomainSelected(false);
+    setTakenAddresses([]);
+    connect.reset();
+  }
   const agentDetail = useQuery({ queryKey: queryKeys.agents.detail(agentId),
     queryFn: () => agentsApi.get(agentId), enabled: !!agentId && trustOpen });
   const trust = useMutation({
@@ -277,7 +278,7 @@ function EmailEndpointSetupForm({ companyId }: { companyId: string }) {
   const error = connect.error ?? (!addressTaken ? setup.error : null) ?? resumeAccount.error ?? inspected.error ?? agents.error;
   const busy = connect.isPending || setup.isPending;
   const identityReady = inboxes.isSuccess && (!resumeId || requestId !== resumeId || !!pendingEndpoint) && (!pendingEndpoint || pendingEndpoint.assignedAgentId === agentId);
-  const canContinue = identityReady && !!chosen && !busy && !(lowTrust && !scoped) && (!!connectionId || !!apiKey.trim());
+  const canContinue = identityReady && !!chosen && !busy && !(lowTrust && !scoped) && (!!pendingAddress || !!selectedCredentialId || !!apiKey.trim());
   const canCreate = identityReady && !!chosen && !busy && !!inspected.data && !(lowTrust && !scoped) && !addressError && !addressCheck.checking
     && (!!pendingAddress || (addressMode === "existing" ? !!inboxId : validUsername));
   const openTrust = () => { if (chosen) { setPermissions(chosen.permissions); setTrustOpen(true); } };
@@ -298,14 +299,19 @@ function EmailEndpointSetupForm({ companyId }: { companyId: string }) {
       availableStep={step} disabled={busy} onSelect={index => { setup.reset(); setStep(index as 0 | 1); }} />}
     {step === 0 && <form className="space-y-6" onSubmit={event => { event.preventDefault(); if (canContinue) connect.mutate(); }}>
       <div className="space-y-2">
-        <Label>Agent</Label>
-        <SearchableSelect value={agentId} disabled={busy || !inboxes.isSuccess || !!pendingEndpoint} loading={agents.isPending} placeholder="Choose an agent" searchPlaceholder="Search all agents…" emptyMessage="No agents found."
-          groups={[{ id: "agents", options: (agents.data ?? []).filter(a => !["terminated", "pending_approval"].includes(a.status))
-            .map(a => ({ key: a.id, value: a.id, label: a.name, icon: a.icon })) }]}
-          onValueChange={(id, option) => { setAgentId(id); setUsername(option.label.toLowerCase().replace(/[^a-z0-9._-]+/g, "-").slice(0, 64)); }}
-          renderValue={option => option ? <span className="flex items-center gap-2"><Avatar size="sm"><AvatarFallback><AgentIcon icon={String(option.icon ?? "bot")} /></AvatarFallback></Avatar>{option.label}</span> : "Choose an agent"} />
+        <Label htmlFor="email-agent">Agent</Label>
+        <AgentSelect id="email-agent" value={agentId} disabled={busy || agents.isPending || !inboxes.isSuccess || !!pendingEndpoint}
+          placeholder="Choose an agent" emptyMessage="No agents found." triggerClassName="h-10"
+          agents={(agents.data ?? []).filter(a => !["terminated", "pending_approval"].includes(a.status))}
+          onChange={id => { setAgentId(id); setUsername((agents.data?.find(a => a.id === id)?.name ?? "").toLowerCase().replace(/[^a-z0-9._-]+/g, "-").slice(0, 64)); }} />
       </div>
-      {!connectionId && <AgentMailApiKeyField value={apiKey} onChange={value => { setApiKey(value); connect.reset(); }} disabled={busy} />}
+      {!pendingAddress && <AgentMailCredentialField companyId={companyId} connectionId={selectedCredentialId}
+        onConnectionChange={selectCredential} value={apiKey} onChange={value => { setApiKey(value); connect.reset(); }} disabled={busy} />}
+      {restrictedInbox && <div className="space-y-2 text-sm">
+        <p className="text-muted-foreground">That key only connects {restrictedInbox}. Choose a saved account key or enter one to create a new address.</p>
+        <Button type="button" variant="link" size="sm" className="h-auto p-0" disabled={busy || !(selectedCredentialId || apiKey.trim())}
+          onClick={() => { setAllowInboxKey(true); setRestrictedInbox(""); connect.reset(); }}>Use the existing inbox instead</Button>
+      </div>}
       {lowTrust && !scoped && <div role="alert" className="space-y-2 text-sm">
         <p>This agent needs a work boundary before it can receive email.</p>
         <Button type="button" variant="outline" size="sm" onClick={openTrust}>Configure work boundary</Button>
@@ -340,14 +346,8 @@ function EmailEndpointSetupForm({ companyId }: { companyId: string }) {
           })}
         </select>}
         {pendingAddress && <p className="text-sm text-muted-foreground">This address is reserved for {chosen?.name}. Continue to finish connecting it.</p>}
-        {scopedKey && !pendingAddress && <div className="space-y-2 text-sm">
-          <p className="text-muted-foreground">This API key can only use {inboxId}. To type a new address or choose a domain, use an account API key.</p>
-          <Button type="button" variant="link" size="sm" className="h-auto p-0" disabled={busy || !identityReady}
-            onClick={() => {
-              setReplacementConnectionId(""); setReplacementKey("");
-              setReplacementRequestId(crypto.randomUUID()); changeAccount.reset(); setAccountOpen(true);
-            }}>Change AgentMail account</Button>
-        </div>}
+        {scopedKey && !pendingAddress && <Button type="button" variant="link" size="sm" className="h-auto p-0" disabled={busy}
+          onClick={() => { setAllowInboxKey(false); setStep(0); }}>Choose a key for a new address</Button>}
         {addressError && <p id="email-address-error" role="alert" className="text-sm text-destructive">{addressError}</p>}
         {checkingNewAddress && !addressError && <p id="email-address-status" role="status" className="text-sm text-muted-foreground">
           {addressCheck.checking ? "Checking address…" : addressCheck.error ? `Could not check this address. ${addressCheck.error}`
@@ -404,42 +404,6 @@ function EmailEndpointSetupForm({ companyId }: { companyId: string }) {
         <Button variant="ghost" onClick={leave}>Email settings</Button><Button onClick={() => navigate("/apps")}>Done</Button>
       </div>
     </div>}
-      <Dialog open={accountOpen} onOpenChange={open => {
-        if (!changeAccount.isPending) { setAccountOpen(open); if (!open) setReplacementKey(""); }
-      }}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Change AgentMail account</DialogTitle>
-            <DialogDescription>Choose a saved account or enter an account API key to create an email address.</DialogDescription>
-          </DialogHeader>
-          <form className="space-y-6" onSubmit={event => {
-            event.preventDefault();
-            if (!changeAccount.isPending && !pendingAddress && (replacementConnectionId || replacementKey.trim())) changeAccount.mutate();
-          }}>
-            {!!otherAccounts?.length && <div className="space-y-2">
-              <Label htmlFor="email-account">AgentMail account</Label>
-              <select id="email-account" className={selectClass} value={replacementConnectionId} disabled={changeAccount.isPending}
-                onChange={event => { setReplacementConnectionId(event.target.value); setReplacementKey(""); changeAccount.reset(); }}>
-                <option value="">Enter another API key</option>
-                {otherAccounts.map(connection => <option key={connection.id} value={connection.id}>
-                  {connection.name} · saved {formatDateTime(connection.createdAt)}
-                </option>)}
-              </select>
-            </div>}
-            {savedAccounts.isFetching && <p role="status" className="text-sm text-muted-foreground">Loading saved accounts…</p>}
-            {savedAccounts.isError && <p role="alert" className="text-sm text-destructive">Could not load saved accounts. {savedAccounts.error.message}</p>}
-            {!replacementConnectionId && <AgentMailApiKeyField value={replacementKey} disabled={changeAccount.isPending}
-              onChange={value => { setReplacementKey(value); changeAccount.reset(); }} />}
-            {changeAccount.error && <p role="alert" className="text-sm text-destructive">{changeAccount.error.message}</p>}
-            <div className="flex items-center justify-between gap-3 border-t border-border pt-5">
-              <Button type="button" variant="ghost" disabled={changeAccount.isPending} onClick={() => { setAccountOpen(false); setReplacementKey(""); }}>Cancel</Button>
-              <Button disabled={changeAccount.isPending || !!pendingAddress || !(replacementConnectionId || replacementKey.trim())}>
-                {changeAccount.isPending ? "Connecting…" : "Use this account"}
-              </Button>
-            </div>
-          </form>
-        </DialogContent>
-      </Dialog>
       <Dialog open={trustOpen} onOpenChange={setTrustOpen}>
         <DialogContent className="max-h-screen overflow-y-auto sm:max-w-2xl">
           <DialogHeader>

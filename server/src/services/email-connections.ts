@@ -8,8 +8,8 @@ import {
   companySecrets,
   toolConnectionInstalls,
 } from "@paperclipai/db";
-import type { EmailConnectionInput } from "@paperclipai/shared";
-import { badRequest, forbidden, notFound } from "../errors.js";
+import type { EmailConnectionInput, EmailCredentialOption } from "@paperclipai/shared";
+import { badRequest, forbidden, HttpError, notFound } from "../errors.js";
 import { secretService } from "./secrets.js";
 import { toolAccessService } from "./tool-access.js";
 import { agentmailApi } from "./agentmail-api.js";
@@ -75,6 +75,43 @@ export function emailConnectionService(
     }
     return connection;
   }
+  async function listCredentials(companyId: string, actor: EmailActor): Promise<EmailCredentialOption[]> {
+    const connections = await db.select().from(toolConnections).where(and(
+      eq(toolConnections.companyId, companyId), eq(toolConnections.status, "active"),
+      eq(toolConnections.enabled, true),
+    ));
+    const options: EmailCredentialOption[] = [];
+    for (const connection of connections) {
+      // Only provider-bound account credentials belong in setup; runtime inbox
+      // keys and unrelated company secrets must never become suggestions.
+      if (connection.config.provider !== "agentmail" || !connection.config.emailCredential) continue;
+      try {
+        await get(companyId, connection.id, actor);
+      } catch (error) {
+        if (error instanceof HttpError && [403, 404].includes(error.status)) continue;
+        throw error;
+      }
+      let scope: EmailCredentialOption["scope"] = "unavailable";
+      let inboxId: string | null = null;
+      try {
+        const saved = await credential(companyId, connection.id, actor);
+        const identity = await agentmailApi(saved.value, fetchImpl).whoami();
+        scope = identity.scope_type;
+        inboxId = identity.inbox_id ?? null;
+      } catch {
+        // A revoked/provider-unavailable key remains an explicit, disabled
+        // choice. Never expose a provider body, key, hash, or secret reference.
+      }
+      options.push({
+        id: connection.id, scope, inboxId, createdAt: connection.createdAt.toISOString(),
+        label: connection.name !== "AgentMail" ? connection.name
+          : scope === "inbox" ? `AgentMail inbox key${inboxId ? ` · ${inboxId}` : ""}`
+          : scope === "unavailable" ? "AgentMail key · unavailable" : "AgentMail account key",
+      });
+    }
+    return options.sort((a, b) => Number(b.scope === "organization" || b.scope === "pod")
+      - Number(a.scope === "organization" || a.scope === "pod") || b.createdAt.localeCompare(a.createdAt));
+  }
   async function assertAgentAccess(
     companyId: string,
     id: string,
@@ -126,7 +163,7 @@ export function emailConnectionService(
     input: EmailConnectionInput,
     actor: EmailActor,
   ) {
-    await agentmailApi(input.apiKey, fetchImpl).whoami();
+    const identity = await agentmailApi(input.apiKey, fetchImpl).whoami();
     return db.transaction(async (tx) => {
       const db = tx as unknown as Db;
       await db.execute(
@@ -166,7 +203,7 @@ export function emailConnectionService(
           actor,
         );
       const secret = await secrets.create(companyId, {
-        name: `AgentMail account ${randomUUID()}`,
+        name: `AgentMail ${identity.scope_type === "inbox" ? "inbox" : "account"} API key ${randomUUID().slice(0, 8)}`,
         provider: "local_encrypted",
         value: input.apiKey,
       });
@@ -190,7 +227,7 @@ export function emailConnectionService(
           credentialPolicy: "shared",
           enabled: true,
           status: "active",
-          config: { provider: "agentmail", emailCredential: true },
+          config: { provider: "agentmail", emailCredential: true, emailScope: identity.scope_type },
           transportConfig: {},
           credentialSecretRefs: [
             {
@@ -332,5 +369,5 @@ export function emailConnectionService(
       });
     });
   }
-  return { get, credential, connect, allowAgent, assertAgentAccess };
+  return { get, credential, connect, listCredentials, allowAgent, assertAgentAccess };
 }

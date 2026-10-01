@@ -3,8 +3,9 @@
 AgentMail is an experimental **channel** connection. Enable experimental chat
 connections and open Apps → AgentMail. Setup has two steps: pick the agent, then
 pick its email address and create it. For a new connection, the first step also
-asks for the API key and defaults to company-wide human access and only the
-selected agent. Saved connections skip the key field. The domain dropdown sits
+suggests an accessible saved AgentMail account key, or asks for a new API key.
+New credentials default to company-wide human access and only the selected agent.
+Reusing a key preserves its grants and other agent installs. The domain dropdown sits
 beside the email name and defaults to the first verified custom domain, falling
 back to `agentmail.to`. An explicit choice is preserved across reloads. Receiving
 mode, sender guidance, and trust settings are under **Advanced options**; an
@@ -32,10 +33,17 @@ key. An existing inbox-scoped key can connect only its own inbox. Credentials
 are vaulted and resolved by the server; they are not passed to agents. An inbox
 can have only one non-archived Paperclip endpoint across the instance.
 
-For an inbox-scoped key, setup explains why the address cannot be edited and
-offers **Change AgentMail account**. The operator can select another saved
-account or enter an account API key. Switching returns to editable email-name
-and domain fields, preserves the selected agent, and starts a new setup request.
+The shared API-key field offers labeled saved credentials and an explicit new-key
+choice. The server filters suggestions by company, provider, active secret, and
+current-user grants, then verifies key scope without returning secret values.
+Organization/pod keys are preferred over inbox-only keys. The same picker is used
+by the inline card. Unrelated or unbound secrets are not suggested.
+
+An inbox-only key is caught on the agent/key step before the email form. Choose
+an account key to type a new name and pick a domain, or explicitly choose
+**Use the existing inbox instead**. Old locked drafts recover at this key choice.
+Switching preserves the agent and starts a new setup request. Agent dropdowns
+use the shared avatar-aware selector for both options and the selected value.
 An already allocated inbox must finish its original setup before changing accounts.
 
 Verified custom domains are selectable after checking the API key. Complete DNS

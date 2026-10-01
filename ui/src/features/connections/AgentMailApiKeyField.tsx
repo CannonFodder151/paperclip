@@ -1,7 +1,5 @@
-import { useId } from "react";
 import { getAppStoreDefinition } from "@paperclipai/shared";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
+import { ApiKeyCredentialField } from "./ApiKeyCredentialField";
 
 export const AGENTMAIL_API_KEYS_URL = getAppStoreDefinition("agentmail")!.methods[0]!.consoleLinks!.keys!;
 
@@ -11,14 +9,7 @@ export function AgentMailApiKeyField({ value, onChange, disabled = false, label 
   disabled?: boolean;
   label?: string;
 }) {
-  const id = useId();
-  return <div className="space-y-2">
-    <Label htmlFor={id}>{label}</Label>
-    <Input id={id} type="password" autoComplete="off" value={value}
-      disabled={disabled} onChange={event => onChange(event.target.value)}
-      placeholder="Paste your AgentMail API key" />
-    <a href={AGENTMAIL_API_KEYS_URL} target="_blank" rel="noreferrer" className="text-sm underline">
-      Get an AgentMail API key ↗
-    </a>
-  </div>;
+  return <ApiKeyCredentialField providerName="AgentMail" keysUrl={AGENTMAIL_API_KEYS_URL}
+    options={[]} connectionId="" onConnectionChange={() => {}} value={value} onChange={onChange}
+    disabled={disabled} label={label} />;
 }

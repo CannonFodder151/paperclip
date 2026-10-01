@@ -1509,6 +1509,7 @@ const BOARD_ONLY_OPERATIONS = new Set([
   "POST /api/tool-gateway/action-requests/{id}/decline",
   "POST /api/companies/{companyId}/email/inspect",
   "POST /api/companies/{companyId}/email/inboxes",
+  "GET /api/companies/{companyId}/email/connections",
   "POST /api/companies/{companyId}/email/connections",
   "POST /api/companies/{companyId}/email/connections/{connectionId}/inspect",
   "POST /api/companies/{companyId}/email/connections/{connectionId}/check-address",
@@ -2148,6 +2149,7 @@ registry.registerPath({
   },
 });
 for (const [method, path, summary, body, success] of [
+  ["get", "/api/companies/{companyId}/email/connections", "List accessible saved AgentMail API keys (metadata only)", undefined, 200],
   ["post", "/api/companies/{companyId}/email/connections", "Save AgentMail credential and access", emailConnectionSchema, 201],
   ["post", "/api/companies/{companyId}/email/connections/{connectionId}/inspect", "Inspect inboxes using a saved AgentMail credential", undefined, 200],
   ["get", "/api/companies/{companyId}/email/inboxes", "List authorized AgentMail inboxes", undefined, 200],

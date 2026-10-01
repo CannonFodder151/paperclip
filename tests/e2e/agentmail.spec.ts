@@ -103,6 +103,10 @@ test("AgentMail setup and email work through the normal task conversation", asyn
   await page.route("**/api/**/email/**", async (route) => {
     const url = new URL(route.request().url()),
       method = route.request().method();
+    if (url.pathname.endsWith("/connections") && method === "GET") return fulfill(route, [
+      { id: organizationConnectionId, label: "AgentMail account key", scope: "organization", createdAt: "2026-09-30T14:00:00Z" },
+      { id: inbox.connectionId, label: "AgentMail inbox key", scope: "inbox", createdAt: "2026-10-01T14:00:00Z" },
+    ]);
     if (url.pathname.endsWith("/connections") && method === "POST") {
       expect(route.request().postDataJSON()).toMatchObject({ apiKey: "inbox-test-key", agentIds: [agent.id], allAgents: false });
       return fulfill(route, { id: inbox.connectionId }, 201);
@@ -179,19 +183,23 @@ test("AgentMail setup and email work through the normal task conversation", asyn
   await expect(
     page.getByRole("heading", { name: "Give an agent an email address" }),
   ).toBeVisible();
-  await page.getByRole("combobox").click();
-  await page.getByPlaceholder("Search all agents…").fill("Mail agent");
-  await page.getByRole("option", { name: "Mail agent" }).click();
-  await page.getByLabel("API key", { exact: true }).fill("inbox-test-key");
+  await page.getByLabel("Agent", { exact: true }).click();
+  await page.getByPlaceholder("Filter agents").fill("Mail agent");
+  await expect(page.getByRole("button", { name: "Select Mail agent", exact: true }).locator('[data-slot="agent-avatar"]')).toBeVisible();
+  await page.getByRole("button", { name: "Select Mail agent", exact: true }).click();
+  await expect(page.locator('#email-agent [data-slot="agent-avatar"]')).toBeVisible();
+  await expect(page.getByLabel("API key", { exact: true })).toHaveValue(organizationConnectionId);
+  // A deliberately selected restricted key stays at credentials until the user
+  // chooses a usable account key or explicitly requests that existing inbox.
+  await page.getByLabel("API key", { exact: true }).selectOption(inbox.connectionId);
   await page.getByRole("button", { name: "Continue", exact: true }).click();
-  await expect(page.getByText(`This API key can only use ${inbox.address}.`, { exact: false })).toBeVisible();
-  await expect(page.getByLabel("Mail agent’s email address", { exact: true })).toBeDisabled();
+  await expect(page.getByText(`That key only connects ${inbox.address}.`, { exact: false })).toBeVisible();
+  await expect(page.getByLabel("Mail agent’s email address", { exact: true })).toHaveCount(0);
   await page.screenshot({ path: test.info().outputPath("agentmail-inbox-key-recovery.png"), fullPage: true });
-  await page.getByRole("button", { name: "Change AgentMail account" }).click();
-  await page.getByLabel("AgentMail account", { exact: true }).selectOption(organizationConnectionId);
-  await page.getByRole("button", { name: "Use this account" }).click();
+  await page.getByLabel("API key", { exact: true }).selectOption(organizationConnectionId);
+  await page.getByRole("button", { name: "Continue", exact: true }).click();
   const addressField = page.getByLabel("Mail agent’s email address", { exact: true });
-  await expect(addressField).toHaveValue("mail-agent");
+  await expect(addressField).toBeEditable();
   await expect(page.getByRole("heading", { name: "How it Works", exact: true })).toBeVisible();
   await expect(page.getByLabel("Email domain", { exact: true })).toHaveValue("verified.example.test");
   await page.getByLabel("Email domain", { exact: true }).selectOption("agentmail.to");

@@ -7,8 +7,8 @@ import { errorHandler } from "../middleware/error-handler.js";
 import { emailRoutes } from "../routes/email.js";
 import type { EmailChannelService } from "../services/email-channels.js";
 
-const mocks = vi.hoisted(() => ({ credential: vi.fn(), requireEnabled: vi.fn(), permission: vi.fn() }));
-vi.mock("../services/email-connections.js", () => ({ emailConnectionService: () => ({ credential: mocks.credential }) }));
+const mocks = vi.hoisted(() => ({ credential: vi.fn(), listCredentials: vi.fn(), requireEnabled: vi.fn(), permission: vi.fn() }));
+vi.mock("../services/email-connections.js", () => ({ emailConnectionService: () => ({ credential: mocks.credential, listCredentials: mocks.listCredentials }) }));
 vi.mock("../services/access.js", () => ({ accessService: () => ({ hasPermission: mocks.permission }) }));
 const companyId = "11111111-1111-4111-8111-111111111111";
 const connectionId = "22222222-2222-4222-8222-222222222222";
@@ -30,6 +30,20 @@ beforeEach(() => {
 });
 afterEach(() => vi.unstubAllGlobals());
 describe("AgentMail address checks", () => {
+  it("lists saved-key metadata with company, manager and feature gates", async () => {
+    const listPath = `/api/companies/${companyId}/email/connections`;
+    mocks.listCredentials.mockResolvedValue([{ id: connectionId, label: "AgentMail account key", scope: "organization" }]);
+    const response = await request(app()).get(listPath).expect(200);
+    expect(response.headers["cache-control"]).toBe("no-store");
+    expect(mocks.listCredentials).toHaveBeenCalledWith(companyId, expect.objectContaining({ userId: "board" }));
+    mocks.listCredentials.mockClear();
+    await request(app({ type: "agent", agentId: connectionId, companyId })).get(listPath).expect(403);
+    await request(app({ type: "board", source: "session", userId: "member", companyIds: [] })).get(listPath).expect(404);
+    await request(app({ type: "board", source: "session", userId: "member", companyIds: [companyId] })).get(listPath).expect(403);
+    mocks.requireEnabled.mockRejectedValueOnce(forbidden("Disabled"));
+    await request(app()).get(listPath).expect(403);
+    expect(mocks.listCredentials).not.toHaveBeenCalled();
+  });
   it("uses the company-scoped saved credential and returns only address status", async () => {
     const response = await request(app()).post(path).send({ username: "Ralph", domain: "AgentMail.to" }).expect(200);
     expect(response.body).toEqual({ address: "ralph@agentmail.to", status: "taken" });

@@ -38,7 +38,7 @@ function AgentMailJourney({ savedConnection = true }: { savedConnection?: boolea
   </ChatSetupSidebarProvider>;
 }
 
-type Scenario = { scopedKey?: boolean; missingBoundary?: boolean; denySetup?: boolean; initialTaken?: boolean; noCustomDomain?: boolean; checkFailed?: boolean };
+type Scenario = { noSavedKeys?: boolean; scopedKey?: boolean; missingBoundary?: boolean; denySetup?: boolean; initialTaken?: boolean; noCustomDomain?: boolean; checkFailed?: boolean };
 const meta = {
   title: "Connections/AgentMail setup",
   component: AgentMailJourney,
@@ -64,6 +64,13 @@ const meta = {
         if (method === "PATCH") agent.permissions = body;
         return Response.json({ ...agent, access: { canAssignTasks: false } });
       }
+      if (url.pathname.endsWith("/email/connections") && method === "GET") return Response.json(scenario.noSavedKeys ? [] : [
+        { id: OTHER_ACCOUNT, label: "AgentMail account key", scope: "organization", createdAt: "2026-09-30T14:00:00Z" },
+        { id: CONNECTION, label: scenario.scopedKey ? "AgentMail inbox key · support@agentmail.to" : "AgentMail account key",
+          scope: scenario.scopedKey ? "inbox" : "organization", createdAt: "2026-10-01T14:00:00Z" },
+      ]);
+      if (url.pathname.endsWith("/email/inspect") && body.apiKey === "invalid-key")
+        return Response.json({ error: "AgentMail rejected the API key. Check it and try again." }, { status: 422 });
       if (url.pathname.endsWith("/email/connections") && method === "POST") {
         if (body.apiKey === "invalid-key") return Response.json({ error: "AgentMail rejected the API key. Check it and try again." }, { status: 422 });
         if (body.grantKind !== "organization" || body.allAgents !== false || body.agentIds.length !== 1) {
@@ -71,7 +78,7 @@ const meta = {
         }
         return Response.json({ id: CONNECTION }, { status: 201 });
       }
-      if ([CONNECTION, OTHER_ACCOUNT].some(id => url.pathname.endsWith(`/email/connections/${id}/inspect`))) {
+      if (url.pathname.endsWith("/email/inspect") || [CONNECTION, OTHER_ACCOUNT].some(id => url.pathname.endsWith(`/email/connections/${id}/inspect`))) {
         const restricted = scenario.scopedKey && url.pathname.includes(CONNECTION);
         return Response.json({
           scope: { scope_type: restricted ? "inbox" : "organization" },
@@ -102,10 +109,10 @@ type Story = StoryObj<typeof meta>;
 
 const chooseAgent: NonNullable<Story["play"]> = async ({ canvasElement }) => {
   const canvas = within(canvasElement);
-  await userEvent.click(await canvas.findByRole("combobox"));
+  await userEvent.click(await canvas.findByLabelText("Agent"));
   const page = within(canvasElement.ownerDocument.body);
-  await userEvent.type(page.getByPlaceholderText("Search all agents…"), "Ralph");
-  await userEvent.click(await page.findByRole("option", { name: "Ralph" }));
+  await userEvent.type(page.getByPlaceholderText("Filter agents"), "Ralph");
+  await userEvent.click(await page.findByRole("button", { name: "Select Ralph" }));
 };
 const chooseAddress: NonNullable<Story["play"]> = async context => {
   await chooseAgent(context);
@@ -138,35 +145,35 @@ export const ExistingInbox: Story = { name: "Use an existing inbox", play: async
   await chooseAddress(context);
   await userEvent.click(within(context.canvasElement).getByRole("button", { name: "Use an existing inbox" }));
 } };
-export const InboxScopedKey: Story = { name: "Inbox-only key · Explain the locked address",
+export const InboxScopedKey: Story = { name: "Inbox-only key · Choose an account key", args: { savedConnection: false },
   parameters: { agentmailScenario: { scopedKey: true } }, play: async context => {
     await chooseAgent(context);
     const canvas = within(context.canvasElement);
+    await userEvent.selectOptions(await canvas.findByLabelText("API key"), CONNECTION);
     await userEvent.click(canvas.getByRole("button", { name: "Continue" }));
-    await expect(await canvas.findByText(/This API key can only use support@agentmail.to/)).toBeVisible();
-    await expect(canvas.getByLabelText("Ralph’s email address")).toBeDisabled();
+    await expect(await canvas.findByText(/That key only connects support@agentmail.to/)).toBeVisible();
+    await expect(canvas.queryByLabelText("Ralph’s email address")).not.toBeInTheDocument();
   } };
-export const SwitchScopedAccount: Story = { name: "Inbox-only key · Switch to an editable address",
+export const SwitchScopedAccount: Story = { name: "Inbox-only key · Switch to an editable address", args: { savedConnection: false },
   parameters: { agentmailScenario: { scopedKey: true } }, play: async context => {
     await InboxScopedKey.play!(context);
     const canvas = within(context.canvasElement);
-    await userEvent.click(canvas.getByRole("button", { name: "Change AgentMail account" }));
-    const page = within(context.canvasElement.ownerDocument.body);
-    await userEvent.selectOptions(await page.findByLabelText("AgentMail account"), OTHER_ACCOUNT);
-    await userEvent.click(page.getByRole("button", { name: "Use this account" }));
+    await userEvent.selectOptions(await canvas.findByLabelText("API key"), OTHER_ACCOUNT);
+    await userEvent.click(canvas.getByRole("button", { name: "Continue" }));
     await waitFor(() => expect(canvas.getByLabelText("Email domain")).toHaveValue("paperclip.example"));
     await userEvent.clear(canvas.getByLabelText("Ralph’s email address"));
     await userEvent.type(canvas.getByLabelText("Ralph’s email address"), "ralph-mail");
     await expect(canvas.getByLabelText("Ralph’s email address")).toHaveValue("ralph-mail");
   } };
+export const SavedApiKey: Story = { name: "Saved account key · Suggested automatically", args: { savedConnection: false }, play: chooseAddress };
 export const AdvancedOptions: Story = { name: "Advanced · Email settings", play: async context => {
   await chooseAddress(context);
   await userEvent.click(within(context.canvasElement).getByText("Advanced options"));
 } };
 export const MissingTrustBoundary: Story = { name: "Existing low-trust agent · Work boundary required",
   parameters: { agentmailScenario: { missingBoundary: true } }, play: chooseAgent };
-export const NewConnection: Story = { name: "First time · API key alongside the agent", args: { savedConnection: false } };
-export const InvalidKey: Story = { name: "Error · Invalid API key", args: { savedConnection: false }, play: async context => {
+export const NewConnection: Story = { name: "First time · API key alongside the agent", args: { savedConnection: false }, parameters: { agentmailScenario: { noSavedKeys: true } } };
+export const InvalidKey: Story = { name: "Error · Invalid API key", args: { savedConnection: false }, parameters: { agentmailScenario: { noSavedKeys: true } }, play: async context => {
   await chooseAgent(context);
   const canvas = within(context.canvasElement);
   await userEvent.type(canvas.getByLabelText("API key"), "invalid-key");

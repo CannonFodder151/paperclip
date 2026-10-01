@@ -985,6 +985,27 @@ describe("AgentMail durable email pipeline", () => {
     expect(f.wakeup).toHaveBeenCalledTimes(1);
   });
 
+  it("suggests only same-provider active credentials authorized for this user", async () => {
+    const f = await fixture();
+    const svc = emailConnectionService(db, f.fetcher);
+    const actor = { userId: "email-board" };
+    const own = await svc.connect(f.companyId, { apiKey: "private-key", grantKind: "user", allAgents: false,
+      agentIds: [], idempotencyKey: randomUUID() }, actor);
+    const shared = await svc.connect(f.companyId, { apiKey: "shared-key", grantKind: "organization", allAgents: false,
+      agentIds: [], idempotencyKey: randomUUID() }, actor);
+    const other = await svc.connect(f.companyId, { apiKey: "other-user-key", grantKind: "user", allAgents: false,
+      agentIds: [], idempotencyKey: randomUUID() }, { userId: "different-user" });
+    const choices = await svc.listCredentials(f.companyId, actor);
+    expect(choices.map(option => option.id).sort()).toEqual([own.id, shared.id].sort());
+    expect(JSON.stringify(choices)).not.toMatch(/private-key|shared-key|other-user-key|secretId|api_key_hash/);
+    expect(choices[0]).toMatchObject({ scope: "inbox", inboxId: f.address });
+    expect((await svc.listCredentials(randomUUID(), actor))).toEqual([]);
+    await db.update(connectionGrants).set({ status: "revoked" }).where(eq(connectionGrants.connectionId, own.id));
+    await db.update(toolConnections).set({ config: { provider: "different", emailCredential: true } }).where(eq(toolConnections.id, shared.id));
+    expect(await svc.listCredentials(f.companyId, actor)).toEqual([]);
+    expect((await svc.listCredentials(f.companyId, { userId: "different-user" })).map(option => option.id)).toEqual([other.id]);
+  });
+
   it("saves a scoped credential before inbox setup, preserves personal ownership, and adds the chosen agent", async () => {
     const f = await fixture();
     const svc = emailConnectionService(db, f.fetcher);
