@@ -67,7 +67,7 @@ async function fill(selector: string, value: string) {
 }
 
 describe("AgentMail two-step setup", () => {
-  it("explains an inbox-only key and switches to a saved account with editable name and domain", async () => {
+  it("recovers an inbox-only key even after a failed attempt leaves an unallocated draft", async () => {
     mocks.inspect.mockImplementation(async (_company, id) => id === "account"
       ? { scope: { scope_type: "inbox" }, inboxes: [{ inbox_id: "locked@agentmail.to" }], domains: [] }
       : { scope: { scope_type: "organization" }, inboxes: [], domains: [{ domain: "paperclip.example", status: "VERIFIED" }] });
@@ -75,11 +75,19 @@ describe("AgentMail two-step setup", () => {
       id: "organization-account", name: "AgentMail", status: "active", enabled: true,
       config: { provider: "agentmail", emailCredential: true }, createdAt: "2026-09-30T14:00:00Z",
     }] });
+    mocks.setup.mockImplementationOnce(async (_company, input) => {
+      mocks.listInboxes.mockResolvedValue([{ id: input.idempotencyKey, assignedAgentId: "ralph", address: null, status: "error" }]);
+      throw new ApiError("AgentMail did not allow this inbox request.", 422, {});
+    });
     await mount();
     await click("Continue");
     await vi.waitFor(() => expect(container.textContent).toContain("This API key can only use locked@agentmail.to"));
     expect(container.querySelector<HTMLSelectElement>("#email-existing")?.disabled).toBe(true);
     expect(container.querySelector("#email-name")).toBeNull();
+    await click("Connect email address");
+    await vi.waitFor(() => expect(container.textContent).toContain("AgentMail did not allow this inbox request."));
+    await vi.waitFor(() => expect(mocks.listInboxes).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(button("Change AgentMail account").disabled).toBe(false));
     await click("Change AgentMail account");
     await vi.waitFor(() => expect(document.querySelector("#email-account")).not.toBeNull());
     await act(async () => {
@@ -100,9 +108,26 @@ describe("AgentMail two-step setup", () => {
     await vi.waitFor(() => expect(mocks.setup).toHaveBeenCalledWith("company", expect.objectContaining({
       credentialConnectionId: "organization-account", assignedAgentId: "ralph", username: "ralph-mail", domain: "agentmail.to",
     })));
-    expect(mocks.setup.mock.calls[0][1].inboxId).toBeUndefined();
+    expect(mocks.setup.mock.calls[1][1].inboxId).toBeUndefined();
+    expect(mocks.setup.mock.calls[1][1].idempotencyKey).not.toBe(mocks.setup.mock.calls[0][1].idempotencyKey);
     expect(mocks.connect).not.toHaveBeenCalled();
     expect(mocks.putInstalls).not.toHaveBeenCalled();
+  });
+
+  it("keeps an already reserved inbox tied to its original account", async () => {
+    const requestId = crypto.randomUUID();
+    sessionStorage.setItem("paperclip.agentmail-setup:company:account:ralph", JSON.stringify({
+      connectionId: "account", agentId: "ralph", step: 1, requestId,
+    }));
+    mocks.inspect.mockResolvedValue({ scope: { scope_type: "inbox" }, inboxes: [{ inbox_id: "locked@agentmail.to" }], domains: [] });
+    mocks.listInboxes.mockResolvedValue([{ id: requestId, assignedAgentId: "ralph", address: "locked@agentmail.to", status: "error" }]);
+    await mount();
+    await vi.waitFor(() => expect(container.textContent).toContain("This address is reserved for Ralph"));
+    expect(container.textContent).not.toContain("Change AgentMail account");
+    await click("Finish connecting");
+    await vi.waitFor(() => expect(mocks.setup).toHaveBeenCalledWith("company", expect.objectContaining({
+      credentialConnectionId: "account", idempotencyKey: requestId, inboxId: "locked@agentmail.to",
+    })));
   });
 
   it("replaces an inbox-only key with a fresh idempotency key without storing the secret", async () => {

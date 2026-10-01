@@ -181,7 +181,7 @@ function EmailEndpointSetupForm({ companyId }: { companyId: string }) {
     && connection.config?.provider === "agentmail" && connection.config.emailCredential);
   const changeAccount = useMutation({
     mutationFn: async () => {
-      if (pendingEndpoint) throw new Error("Finish connecting the reserved address before changing accounts.");
+      if (pendingAddress) throw new Error("Finish connecting the reserved address before changing accounts.");
       if (replacementConnectionId) {
         // Verify this user can use the saved credential before switching drafts.
         await emailApi.inspectSaved(companyId, replacementConnectionId);
@@ -321,7 +321,7 @@ function EmailEndpointSetupForm({ companyId }: { companyId: string }) {
           })}
         </select>}
         {pendingAddress && <p className="text-sm text-muted-foreground">This address is reserved for {chosen?.name}. Continue to finish connecting it.</p>}
-        {scopedKey && !pendingEndpoint && <div className="space-y-2 text-sm">
+        {scopedKey && !pendingAddress && <div className="space-y-2 text-sm">
           <p className="text-muted-foreground">This API key can only use {inboxId}. To type a new address or choose a domain, use an account API key.</p>
           <Button type="button" variant="link" size="sm" className="h-auto p-0" disabled={busy || !identityReady}
             onClick={() => {
@@ -390,7 +390,7 @@ function EmailEndpointSetupForm({ companyId }: { companyId: string }) {
           </DialogHeader>
           <form className="space-y-6" onSubmit={event => {
             event.preventDefault();
-            if (!changeAccount.isPending && !pendingEndpoint && (replacementConnectionId || replacementKey.trim())) changeAccount.mutate();
+            if (!changeAccount.isPending && !pendingAddress && (replacementConnectionId || replacementKey.trim())) changeAccount.mutate();
           }}>
             {!!otherAccounts?.length && <div className="space-y-2">
               <Label htmlFor="email-account">AgentMail account</Label>
@@ -409,7 +409,7 @@ function EmailEndpointSetupForm({ companyId }: { companyId: string }) {
             {changeAccount.error && <p role="alert" className="text-sm text-destructive">{changeAccount.error.message}</p>}
             <div className="flex items-center justify-between gap-3 border-t border-border pt-5">
               <Button type="button" variant="ghost" disabled={changeAccount.isPending} onClick={() => { setAccountOpen(false); setReplacementKey(""); }}>Cancel</Button>
-              <Button disabled={changeAccount.isPending || !!pendingEndpoint || !(replacementConnectionId || replacementKey.trim())}>
+              <Button disabled={changeAccount.isPending || !!pendingAddress || !(replacementConnectionId || replacementKey.trim())}>
                 {changeAccount.isPending ? "Connecting…" : "Use this account"}
               </Button>
             </div>
