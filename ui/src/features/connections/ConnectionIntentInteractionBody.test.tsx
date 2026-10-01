@@ -18,8 +18,13 @@ import { ConnectionIntentInteractionBody } from "./ConnectionIntentInteractionBo
 
 const emailConnectMock = vi.hoisted(() => vi.fn());
 const emailSetupMock = vi.hoisted(() => vi.fn());
+const emailListMock = vi.hoisted(() => vi.fn());
+const emailControlMock = vi.hoisted(() => vi.fn());
+const emailCredentialsMock = vi.hoisted(() => vi.fn());
 vi.mock("@/api/email", () => ({ emailApi: {
-  credentials: async () => [],
+  credentials: (...args: unknown[]) => emailCredentialsMock(...args),
+  list: (...args: unknown[]) => emailListMock(...args),
+  control: (...args: unknown[]) => emailControlMock(...args),
   connect: (...args: unknown[]) => emailConnectMock(...args),
   setup: (...args: unknown[]) => emailSetupMock(...args),
 } }));
@@ -183,6 +188,10 @@ function button(label: string) {
 }
 
 beforeEach(() => {
+  sessionStorage.clear();
+  emailCredentialsMock.mockReset().mockResolvedValue([]);
+  emailListMock.mockReset().mockResolvedValue([]);
+  emailControlMock.mockReset().mockResolvedValue({});
   emailConnectMock.mockReset().mockResolvedValue({ id: "email-account" });
   emailSetupMock.mockReset().mockResolvedValue({ connectionId: "email-inbox" });
   setDefaultMock.mockReset();
@@ -645,6 +654,39 @@ describe("AgentMail inline setup", () => {
     expect(emailConnectMock).toHaveBeenCalledTimes(1);
     expect(emailSetupMock).toHaveBeenCalledTimes(2);
     expect(completeMock).toHaveBeenCalledWith(interaction.id, "email-inbox");
+  });
+  it("can choose another key after a saved key fails, retiring an empty draft and preserving the retry identity", async () => {
+    emailCredentialsMock.mockResolvedValue([{ id: "saved-account", label: "Saved key", scope: "organization", createdAt: "2026-10-01T14:00:00Z" }]);
+    emailSetupMock.mockRejectedValueOnce(new Error("Inbox already assigned"))
+      .mockRejectedValueOnce(new Error("Temporary provider failure"));
+    emailListMock.mockResolvedValue([{ id: interaction.id, address: null, status: "draft" }]);
+    renderBody(interaction); await flush();
+    await waitForAssertion(() => expect(button("Connect AgentMail")?.disabled).toBe(false));
+    await act(() => button("Connect AgentMail")!.click()); await flush();
+    expect(emailConnectMock).not.toHaveBeenCalled();
+    await act(() => button("Change API key")!.click()); await flush();
+    expect(emailControlMock).toHaveBeenCalledWith(interaction.id, "remove");
+    await enterKey();
+    await act(() => button("Connect AgentMail")!.click()); await flush();
+    const next = emailSetupMock.mock.calls[1][1].idempotencyKey;
+    expect(next).not.toBe(interaction.id);
+    expect(emailConnectMock).toHaveBeenCalledWith(interaction.companyId, expect.objectContaining({ idempotencyKey: next }));
+    expect(sessionStorage.getItem(`paperclip.agentmail-inline:${interaction.companyId}:${interaction.id}`)).not.toContain("fixture-api-key");
+    await act(() => root!.unmount()); host!.remove(); queryClient.clear();
+    renderBody(interaction); await flush();
+    await act(() => button("Finish setup")!.click()); await flush();
+    expect(emailSetupMock.mock.calls[2][1].idempotencyKey).toBe(next);
+    expect(emailConnectMock).toHaveBeenCalledTimes(1);
+    expect(completeMock).toHaveBeenCalledWith(interaction.id, "email-inbox");
+  });
+  it("does not switch keys after an inbox address is allocated", async () => {
+    setupOptionsMock.mockResolvedValue({ existingConnections: [], emailSetup: { credentialConnectionId: "saved-account", readyConnectionId: null } });
+    emailListMock.mockResolvedValue([{ id: interaction.id, address: "reserved@example.test", status: "draft" }]);
+    renderBody(interaction); await flush();
+    await act(() => button("Change API key")!.click()); await flush();
+    expect(document.body.textContent).toContain("reserved@example.test is already reserved");
+    expect(emailControlMock).not.toHaveBeenCalled();
+    expect(document.querySelector('input[type="password"]')).toBeNull();
   });
   it("resumes a saved account after reload and retries acceptance without recreating the inbox", async () => {
     setupOptionsMock.mockResolvedValue({ existingConnections: [], emailSetup: { credentialConnectionId: "email-account", readyConnectionId: "email-inbox" } });

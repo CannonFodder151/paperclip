@@ -151,6 +151,27 @@ describe("AgentMail two-step setup", () => {
     expect(mocks.putInstalls).not.toHaveBeenCalled();
   });
 
+  it.each(["alternate", ""])("preserves the selected key choice across refresh (%s)", async selection => {
+    mocks.credentials.mockResolvedValue([
+      { id: "preferred", label: "Preferred account", scope: "organization", createdAt: "2026-10-01T14:00:00Z" },
+      { id: "alternate", label: "Other account", scope: "organization", createdAt: "2026-09-30T14:00:00Z" },
+    ]);
+    await mount(false);
+    await vi.waitFor(() => expect(container.querySelector<HTMLSelectElement>("select")?.value).toBe("preferred"));
+    await act(async () => {
+      const picker = container.querySelector<HTMLSelectElement>("select")!;
+      picker.value = selection; picker.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    await act(async () => root.unmount()); client.clear(); root = createRoot(container);
+    await mount(false);
+    await vi.waitFor(() => expect(container.querySelector<HTMLSelectElement>("select")?.value).toBe(selection));
+    if (!selection) expect(container.querySelector('input[type="password"]')).not.toBeNull();
+    else {
+      await click("Continue");
+      await vi.waitFor(() => expect(mocks.inspect).toHaveBeenCalledWith("company", "alternate"));
+    }
+  });
+
   it("does not replace a newly entered key when saved-key discovery finishes later", async () => {
     let resolve!: (options: unknown[]) => void;
     mocks.credentials.mockReturnValue(new Promise(value => { resolve = value; }));

@@ -54,6 +54,7 @@ interface EmailSetupDraft {
   domainSelected: boolean;
   takenAddresses: string[];
   allowInboxKey: boolean;
+  selectedCredentialId: string | null;
 }
 function readEmailSetupDraft(key: string): Partial<EmailSetupDraft> {
   try {
@@ -67,6 +68,7 @@ function readEmailSetupDraft(key: string): Partial<EmailSetupDraft> {
     if (typeof value.requestId === "string" && isUuidLike(value.requestId)) draft.requestId = value.requestId;
     if (value.addressMode === "new" || value.addressMode === "existing") draft.addressMode = value.addressMode;
     if (value.mode === "websocket" || value.mode === "webhook") draft.mode = value.mode;
+    if (value.selectedCredentialId === null || typeof value.selectedCredentialId === "string") draft.selectedCredentialId = value.selectedCredentialId;
     if (typeof value.allowInboxKey === "boolean") draft.allowInboxKey = value.allowInboxKey;
     if (typeof value.domainSelected === "boolean") draft.domainSelected = value.domainSelected;
     if (Array.isArray(value.takenAddresses)) draft.takenAddresses = value.takenAddresses
@@ -94,7 +96,7 @@ function EmailEndpointSetupForm({ companyId }: { companyId: string }) {
   const [step, setStep] = useState<0 | 1 | 2>(draft.step ?? (resumeId ? 1 : 0));
   const [agentId, setAgentId] = useState(draft.agentId ?? params.get("agentId") ?? "");
   const [apiKey, setApiKey] = useState("");
-  const [selectedCredentialId, setSelectedCredentialId] = useState<string | null>(connectionId || null);
+  const [selectedCredentialId, setSelectedCredentialId] = useState<string | null>(draft.selectedCredentialId !== undefined ? draft.selectedCredentialId : connectionId || null);
   const [restrictedInbox, setRestrictedInbox] = useState("");
   const [allowInboxKey, setAllowInboxKey] = useState(draft.allowInboxKey ?? false);
   const [requestId, setRequestId] = useState(() => draft.requestId ?? resumeId ?? (setupId && isUuidLike(setupId) ? setupId : crypto.randomUUID()));
@@ -114,9 +116,9 @@ function EmailEndpointSetupForm({ companyId }: { companyId: string }) {
     try {
       if (step === 2) sessionStorage.removeItem(draftKey);
       else sessionStorage.setItem(draftKey, JSON.stringify({ connectionId, step, agentId,
-        requestId, addressMode, inboxId, username, domain, domainSelected, takenAddresses, mode, allowInboxKey }));
+        requestId, addressMode, inboxId, username, domain, domainSelected, takenAddresses, mode, allowInboxKey, selectedCredentialId }));
     } catch { /* Setup remains usable when browser storage is unavailable. */ }
-  }, [companyId, draftKey, connectionId, step, agentId, requestId, addressMode, inboxId, username, domain, domainSelected, takenAddresses, mode, allowInboxKey]);
+  }, [companyId, draftKey, connectionId, step, agentId, requestId, addressMode, inboxId, username, domain, domainSelected, takenAddresses, mode, allowInboxKey, selectedCredentialId]);
   const agents = useQuery({ queryKey: queryKeys.agents.list(companyId),
     queryFn: () => agentsApi.list(companyId), enabled: !!companyId });
   const projects = useQuery({ queryKey: queryKeys.projects.list(companyId),

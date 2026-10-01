@@ -81,34 +81,47 @@ export function emailConnectionService(
       eq(toolConnections.enabled, true),
     ));
     const options: EmailCredentialOption[] = [];
-    for (const connection of connections) {
-      // Only provider-bound account credentials belong in setup; runtime inbox
-      // keys and unrelated company secrets must never become suggestions.
-      if (connection.config.provider !== "agentmail" || !connection.config.emailCredential) continue;
-      try {
-        await get(companyId, connection.id, actor);
-      } catch (error) {
-        if (error instanceof HttpError && [403, 404].includes(error.status)) continue;
-        throw error;
+    const candidates = connections.filter(connection => connection.config.provider === "agentmail" && connection.config.emailCredential);
+    // New credentials already have verified scope metadata. Legacy credentials
+    // get a bounded discovery pass: four workers share one three-second budget.
+    const deadline = AbortSignal.timeout(3_000);
+    const discoveryFetch: typeof fetch = (input, init) => fetchImpl(input, {
+      ...init, signal: init?.signal ? AbortSignal.any([init.signal, deadline]) : deadline,
+    });
+    let next = 0;
+    await Promise.all(Array.from({ length: Math.min(4, candidates.length) }, async () => {
+      while (next < candidates.length) {
+        const connection = candidates[next++];
+        try {
+          await get(companyId, connection.id, actor);
+        } catch (error) {
+          if (error instanceof HttpError && [403, 404].includes(error.status)) continue;
+          throw error;
+        }
+        const storedScope = connection.config.emailScope;
+        let scope: EmailCredentialOption["scope"] = storedScope === "organization" || storedScope === "pod" || storedScope === "inbox"
+          ? storedScope : "unavailable";
+        let inboxId = typeof connection.config.emailInboxId === "string" ? connection.config.emailInboxId : null;
+        if (scope === "unavailable" && !deadline.aborted) {
+          try {
+            const saved = await credential(companyId, connection.id, actor);
+            if (!deadline.aborted) {
+              const identity = await agentmailApi(saved.value, discoveryFetch).whoami();
+              scope = identity.scope_type;
+              inboxId = identity.inbox_id ?? null;
+            }
+          } catch {
+            // Never expose a provider body, key, hash, or secret reference.
+          }
+        }
+        options.push({
+          id: connection.id, scope, inboxId, createdAt: connection.createdAt.toISOString(),
+          label: connection.name !== "AgentMail" ? connection.name
+            : scope === "inbox" ? `AgentMail inbox key${inboxId ? ` · ${inboxId}` : ""}`
+            : scope === "unavailable" ? "AgentMail key · unavailable" : "AgentMail account key",
+        });
       }
-      let scope: EmailCredentialOption["scope"] = "unavailable";
-      let inboxId: string | null = null;
-      try {
-        const saved = await credential(companyId, connection.id, actor);
-        const identity = await agentmailApi(saved.value, fetchImpl).whoami();
-        scope = identity.scope_type;
-        inboxId = identity.inbox_id ?? null;
-      } catch {
-        // A revoked/provider-unavailable key remains an explicit, disabled
-        // choice. Never expose a provider body, key, hash, or secret reference.
-      }
-      options.push({
-        id: connection.id, scope, inboxId, createdAt: connection.createdAt.toISOString(),
-        label: connection.name !== "AgentMail" ? connection.name
-          : scope === "inbox" ? `AgentMail inbox key${inboxId ? ` · ${inboxId}` : ""}`
-          : scope === "unavailable" ? "AgentMail key · unavailable" : "AgentMail account key",
-      });
-    }
+    }));
     return options.sort((a, b) => Number(b.scope === "organization" || b.scope === "pod")
       - Number(a.scope === "organization" || a.scope === "pod") || b.createdAt.localeCompare(a.createdAt));
   }
@@ -227,7 +240,7 @@ export function emailConnectionService(
           credentialPolicy: "shared",
           enabled: true,
           status: "active",
-          config: { provider: "agentmail", emailCredential: true, emailScope: identity.scope_type },
+          config: { provider: "agentmail", emailCredential: true, emailScope: identity.scope_type, emailInboxId: identity.inbox_id ?? null },
           transportConfig: {},
           credentialSecretRefs: [
             {

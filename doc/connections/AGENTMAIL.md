@@ -35,13 +35,19 @@ can have only one non-archived Paperclip endpoint across the instance.
 
 The shared API-key field offers labeled saved credentials and an explicit new-key
 choice. The server filters suggestions by company, provider, active secret, and
-current-user grants, then verifies key scope without returning secret values.
+current-user grants. Scope metadata is saved during key validation; legacy keys
+are checked with bounded concurrency under a shared three-second deadline.
+No secret values are returned. Use still rechecks authorization and the key.
 Organization/pod keys are preferred over inbox-only keys. The same picker is used
 by the inline card. Unrelated or unbound secrets are not suggested.
 
 An inbox-only key is caught on the agent/key step before the email form. Choose
 an account key to type a new name and pick a domain, or explicitly choose
 **Use the existing inbox instead**. Old locked drafts recover at this key choice.
+The selected credential or explicit new-key choice survives refresh without
+storing the key text. Failed inline setup offers **Change API key** before any
+address is allocated; it retires an empty draft and preserves the replacement
+request identity across refresh.
 Switching preserves the agent and starts a new setup request. Agent dropdowns
 use the shared avatar-aware selector for both options and the selected value.
 An already allocated inbox must finish its original setup before changing accounts.

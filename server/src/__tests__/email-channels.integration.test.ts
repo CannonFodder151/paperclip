@@ -1006,6 +1006,36 @@ describe("AgentMail durable email pipeline", () => {
     expect((await svc.listCredentials(f.companyId, { userId: "different-user" })).map(option => option.id)).toEqual([other.id]);
   });
 
+  it("bounds legacy saved-key discovery and checks slow keys concurrently", async () => {
+    const f = await fixture();
+    const actor = { userId: "email-board" };
+    const svc = emailConnectionService(db, f.fetcher);
+    const ids = [];
+    for (let i = 0; i < 2; i++) {
+      const row = await svc.connect(f.companyId, { apiKey: `legacy-key-${i}`, grantKind: "organization", allAgents: false,
+        agentIds: [], idempotencyKey: randomUUID() }, actor);
+      ids.push(row.id);
+      await db.update(toolConnections).set({ config: { provider: "agentmail", emailCredential: true } }).where(eq(toolConnections.id, row.id));
+    }
+    let concurrent = 0, peak = 0;
+    const signals: AbortSignal[] = [];
+    const slowFetch = vi.fn<typeof fetch>(async (_url, init) => {
+      concurrent++; peak = Math.max(peak, concurrent);
+      const signal = init!.signal!; signals.push(signal);
+      try {
+        return await new Promise<Response>((_resolve, reject) => {
+          if (signal.aborted) reject(new Error("Discovery deadline"));
+          else signal.addEventListener("abort", () => reject(new Error("Discovery deadline")), { once: true });
+        });
+      } finally { concurrent--; }
+    });
+    const choices = await emailConnectionService(db, slowFetch).listCredentials(f.companyId, actor);
+    expect(choices.map(option => option.id).sort()).toEqual(ids.sort());
+    expect(choices.every(option => option.scope === "unavailable")).toBe(true);
+    expect(peak).toBe(2);
+    expect(signals.every(signal => signal.aborted)).toBe(true);
+  }, 10_000);
+
   it("saves a scoped credential before inbox setup, preserves personal ownership, and adds the chosen agent", async () => {
     const f = await fixture();
     const svc = emailConnectionService(db, f.fetcher);
