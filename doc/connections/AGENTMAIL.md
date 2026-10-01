@@ -117,6 +117,7 @@ All paths below are relative to `/api`:
 | --- | --- |
 | Save credential and human/agent access | `POST /companies/:companyId/email/connections` |
 | Inspect a saved credential | `POST /companies/:companyId/email/connections/:connectionId/inspect` |
+| Check an address without creating an inbox (connection manager) | `POST /companies/:companyId/email/connections/:connectionId/check-address` |
 | List authorized inboxes | `GET /companies/:companyId/email/inboxes` |
 | Inspect setup credentials (connection manager) | `POST /companies/:companyId/email/inspect` |
 | Create or attach an inbox (connection manager) | `POST /companies/:companyId/email/inboxes` |

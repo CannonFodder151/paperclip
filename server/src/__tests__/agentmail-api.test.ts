@@ -339,6 +339,10 @@ describe("AgentMail protocol boundary", () => {
     expect(send?.responses).toHaveProperty("202");
     const setup = operations.find(o => o.path === "/api/companies/{companyId}/email/inspect");
     expect(JSON.stringify(setup?.authorization)).toContain("board");
+    const check = operations.find(o => o.path === "/api/companies/{companyId}/email/connections/{connectionId}/check-address");
+    expect(check?.requestBody).toBeDefined();
+    expect(JSON.stringify(check?.authorization)).toContain("board");
+    expect(check?.responses).toHaveProperty("429");
   });
 
 });
