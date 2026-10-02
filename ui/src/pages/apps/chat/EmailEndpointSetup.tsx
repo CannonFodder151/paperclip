@@ -723,7 +723,7 @@ export function EmailEndpointSettings({
             <h2 id="email-disconnect-heading" className="text-sm font-semibold">Disconnect inbox</h2>
             <p className="text-sm text-muted-foreground">Stop receiving email in Paperclip. The inbox stays in AgentMail.</p>
           </div>
-          <Button variant="outline" size="sm" className="text-destructive" disabled={control.isPending}
+          <Button variant="outline" size="sm" disabled={control.isPending}
             onClick={() => control.mutate("remove")}>
             Disconnect inbox
           </Button>
