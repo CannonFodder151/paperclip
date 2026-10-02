@@ -124,6 +124,13 @@ function createApp(db: any, deploymentMode: "authenticated" | "local_trusted" = 
     assertCompanyAccess(req, req.params.companyId);
     res.json({ id: req.params.issueId, writable: true });
   });
+  // Real routes are mounted under /api; unauthenticated access there resolves to
+  // the existence-oracle 404 rather than a body, which is what the run-header
+  // 401 assertion below has to beat.
+  app.get("/api/companies/:companyId/issues/:issueId", (req, res) => {
+    assertCompanyAccess(req, req.params.companyId);
+    res.status(404).json({ error: "Issue not found" });
+  });
   app.use(errorHandler);
   return app;
 }
@@ -546,5 +553,19 @@ describe("agent auth middleware", () => {
       entityId: keyId,
       details: { method: "GET", url: `/companies/${companyId}/protected` },
     });
+  });
+
+  it("fails run-scoped /api requests that carry no credentials as 401 instead of a route 404", async () => {
+    // The old fall-through resolved `actor.type === "none"`, so every
+    // company-scoped route answered its existence-oracle 404 ("Issue not
+    // found") and the agent concluded the API was down (AUT-2259 / AUT-4454).
+    const companyId = randomUUID();
+    const { db } = createDbState({ agent: { id: randomUUID(), companyId } });
+    const client = createApp(db);
+    const res = await request(client)
+      .get(`/api/companies/${companyId}/issues/${randomUUID()}`)
+      .set("X-Paperclip-Run-Id", randomUUID());
+    expect(res.status).toBe(401);
+    expect(res.body.error).toMatch(/agent credentials/i);
   });
 });
