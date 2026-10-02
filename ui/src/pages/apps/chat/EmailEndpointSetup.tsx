@@ -593,6 +593,10 @@ export function EmailEndpointSettings({
   );
   const [removed, setRemoved] = useState(false);
   const [replacementKey, setReplacementKey] = useState("");
+  const [reconnectOpen, setReconnectOpen] = useState(false);
+  useEffect(() => {
+    if (inbox?.lastError) setReconnectOpen(true);
+  }, [inbox?.lastError]);
   const [receiveMode, setReceiveMode] = useState<"websocket" | "webhook" | "">(
     "",
   );
@@ -656,12 +660,17 @@ export function EmailEndpointSettings({
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-2">
             <h2 id="email-receiving-heading" className="text-sm font-semibold">Receiving email</h2>
-            {inbox.status !== "active" && <StatusBadge status={inbox.status} />}
+            {(inbox.status !== "active" || inbox.lastError) && (
+              <StatusBadge status={inbox.status === "active" ? "attention" : inbox.status}
+                label={inbox.status === "active" ? "Needs attention" : inbox.status === "revoked" ? "Access revoked" : undefined} />
+            )}
           </div>
-          <Button variant="outline" size="sm" disabled={control.isPending}
-            onClick={() => control.mutate(inbox.status === "active" ? "pause" : "resume")}>
-            {inbox.status === "active" ? "Pause" : "Resume"}
-          </Button>
+          {["active", "paused"].includes(inbox.status) && (
+            <Button variant="outline" size="sm" disabled={control.isPending}
+              onClick={() => control.mutate(inbox.status === "active" ? "pause" : "resume")}>
+              {inbox.status === "active" ? "Pause" : "Resume"}
+            </Button>
+          )}
         </div>
         {inbox.status === "paused" && (
           <p className="text-sm text-muted-foreground">Receiving is paused. Resume to receive new email.</p>
@@ -682,7 +691,7 @@ export function EmailEndpointSettings({
         )}
       </section>
 
-      <details className="border-t border-border pt-5">
+      <details open={reconnectOpen} onToggle={(event) => setReconnectOpen(event.currentTarget.open)} className="border-t border-border pt-5">
         <summary className="cursor-pointer text-sm font-medium">Reconnect inbox</summary>
         <div className="space-y-4 pt-4">
           <p className="text-sm text-muted-foreground">

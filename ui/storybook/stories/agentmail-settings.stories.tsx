@@ -41,7 +41,12 @@ type Story = StoryObj<typeof meta>;
 
 export const Receiving: Story = {};
 export const Paused: Story = { parameters: { inbox: { status: "paused" } } };
-export const NeedsAttention: Story = { parameters: { inbox: { status: "revoked", lastError: "AgentMail rejected the API key. Reconnect this inbox with a valid key." } } };
+export const NeedsAttention: Story = { parameters: { inbox: { status: "revoked", lastError: "AgentMail rejected the API key. Reconnect this inbox with a valid key." } }, play: async ({ canvasElement }) => {
+  const canvas = within(canvasElement);
+  await expect(await canvas.findByText("Access revoked")).toBeVisible();
+  await expect(canvas.queryByRole("button", { name: "Resume" })).not.toBeInTheDocument();
+  await expect(canvas.getByLabelText("New API key")).toBeVisible();
+} };
 export const Webhook: Story = { parameters: { inbox: { receiveMode: "webhook", lastSyncAt: null } } };
 export const LongAddress: Story = { parameters: { inbox: { address: "ralph-customer-support-and-operations@paperclip.example" } } };
 export const Mobile: Story = { globals: { viewport: { value: "mobile1", isRotated: false } }, parameters: { waitForViewport: true } };
