@@ -10,6 +10,7 @@ import {
   ArrowLeft,
   ArrowRight,
   Check,
+  Copy,
   Mail,
 } from "lucide-react";
 import { useCompany } from "@/context/CompanyContext";
@@ -23,6 +24,9 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Card, CardHeader, CardDescription } from "@/components/ui/card";
+import { CopyText } from "@/components/CopyText";
+import { StatusBadge } from "@/components/StatusBadge";
+import { formatDateTime } from "@/lib/utils";
 import { AgentSelect } from "@/components/AgentMultiSelect";
 import { TrustPresetSection } from "@/components/TrustPresetSection";
 import { EmailSafetyNotice } from "@/components/EmailSafetyNotice";
@@ -572,9 +576,11 @@ export function EmailConnectionInboxes({
 export function EmailEndpointSettings({
   endpointId,
   companyId,
+  assignedAgentName,
 }: {
   endpointId: string;
   companyId: string;
+  assignedAgentName: string;
 }) {
   const cache = useQueryClient();
   const query = useQuery({
@@ -621,74 +627,102 @@ export function EmailEndpointSettings({
       </p>
     );
   return (
-    <div className="max-w-xl space-y-4">
-      <h1 className="text-xl font-bold">{inbox.address}</h1>
-      <p className="text-sm text-muted-foreground">
-        {inbox.status} ·{" "}
-        {inbox.receiveMode === "websocket" ? "Live connection" : "Webhook"}
-      </p>
-      <p className="text-sm text-muted-foreground">
-        Last mail check: {inbox.lastSyncAt ? new Date(inbox.lastSyncAt).toLocaleString() : "Not checked yet"}
-      </p>
-      <p className="text-sm">
-        Each email conversation is a task. Task comments stay internal; use
-        Email reply to send.
-      </p>
-      {inbox.lastError && (
-        <p role="alert" className="text-sm text-destructive">
-          {inbox.lastError}
+    <div className="max-w-2xl space-y-8 pb-8">
+      <header className="space-y-2">
+        <p className="text-sm text-muted-foreground">{assignedAgentName}’s email address</p>
+        <div className="flex items-start gap-2">
+          <h1 className="min-w-0 break-all text-xl font-bold">{inbox.address ?? "Email inbox"}</h1>
+          {inbox.address && (
+            <CopyText text={inbox.address} ariaLabel="Copy email address" title="Copy email address"
+              className="rounded-md p-1 text-muted-foreground">
+              <Copy className="size-4" />
+            </CopyText>
+          )}
+        </div>
+        <p className="text-sm text-muted-foreground">
+          Send an email to this address to start a task with {assignedAgentName}.
         </p>
-      )}
-      <div className="flex gap-2">
-        <Button
-          variant="outline"
-          disabled={control.isPending}
-          onClick={() =>
-            control.mutate(inbox.status === "active" ? "pause" : "resume")
-          }
-        >
-          {inbox.status === "active" ? "Pause" : "Resume"}
-        </Button>
-        <Button
-          variant="outline"
-          disabled={control.isPending}
-          onClick={() => control.mutate("remove")}
-        >
-          Disconnect inbox
-        </Button>
-      </div>
-      <div className="space-y-2">
-        <AgentMailApiKeyField label="Reconnect this inbox with a new API key" value={replacementKey} onChange={setReplacementKey} disabled={reconnect.isPending} />
-        <Label htmlFor="email-reconnect-mode">Receiving mode</Label>
-        <select
-          id="email-reconnect-mode"
-          className={selectClass}
-          value={receiveMode || inbox.receiveMode}
-          onChange={(e) =>
-            setReceiveMode(e.target.value as "websocket" | "webhook")
-          }
-        >
-          <option value="websocket">Live connection</option>
-          <option value="webhook">Webhook</option>
-        </select>
-        <Button
-          variant="outline"
-          disabled={!replacementKey || reconnect.isPending}
-          onClick={() => reconnect.mutate()}
-        >
-          Reconnect inbox
-        </Button>
-      </div>
-      {reconnect.error && (
-        <p role="alert" className="text-sm text-destructive">
-          {reconnect.error.message}
+      </header>
+
+      <Card className="gap-2 p-4">
+        <h2 className="text-sm font-semibold">How it Works</h2>
+        <p className="text-sm text-muted-foreground">
+          Incoming email creates tasks for {assignedAgentName}. Replies stay in the same task.
+          Task comments stay internal; use Email reply to send an email.
         </p>
-      )}
-      {control.error && (
-        <p role="alert" className="text-sm text-destructive">
-          {control.error.message}
-        </p>
-      )}
+      </Card>
+
+      <section aria-labelledby="email-receiving-heading" className="space-y-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-2">
+            <h2 id="email-receiving-heading" className="text-sm font-semibold">Receiving email</h2>
+            {inbox.status !== "active" && <StatusBadge status={inbox.status} />}
+          </div>
+          <Button variant="outline" size="sm" disabled={control.isPending}
+            onClick={() => control.mutate(inbox.status === "active" ? "pause" : "resume")}>
+            {inbox.status === "active" ? "Pause" : "Resume"}
+          </Button>
+        </div>
+        {inbox.status === "paused" && (
+          <p className="text-sm text-muted-foreground">Receiving is paused. Resume to receive new email.</p>
+        )}
+        <dl className="grid gap-3 sm:grid-cols-2">
+          <div className="space-y-1">
+            <dt className="text-xs text-muted-foreground">Receiving mode</dt>
+            <dd className="text-sm">{inbox.receiveMode === "websocket" ? "Live connection" : "Webhook"}</dd>
+          </div>
+          <div className="space-y-1">
+            <dt className="text-xs text-muted-foreground">Last mail check</dt>
+            <dd className="font-mono text-xs">{inbox.lastSyncAt ? formatDateTime(inbox.lastSyncAt) : "Not checked yet"}</dd>
+          </div>
+        </dl>
+        {inbox.lastError && <p role="alert" className="text-sm text-destructive">{inbox.lastError}</p>}
+        {control.error && control.variables !== "remove" && (
+          <p role="alert" className="text-sm text-destructive">{control.error.message}</p>
+        )}
+      </section>
+
+      <details className="border-t border-border pt-5">
+        <summary className="cursor-pointer text-sm font-medium">Reconnect inbox</summary>
+        <div className="space-y-4 pt-4">
+          <p className="text-sm text-muted-foreground">
+            Replace the API key or change how this inbox receives email. The email address and task history stay the same.
+          </p>
+          <AgentMailApiKeyField label="New API key" value={replacementKey} onChange={setReplacementKey} disabled={reconnect.isPending} />
+          <div className="space-y-2">
+            <Label htmlFor="email-reconnect-mode">Receiving mode</Label>
+            <select id="email-reconnect-mode" className={selectClass}
+              disabled={reconnect.isPending} value={receiveMode || inbox.receiveMode}
+              onChange={(e) => setReceiveMode(e.target.value as "websocket" | "webhook")}>
+              <option value="websocket">Live connection</option>
+              <option value="webhook">Webhook</option>
+            </select>
+          </div>
+          {reconnect.error && <p role="alert" className="text-sm text-destructive">{reconnect.error.message}</p>}
+          {reconnect.isSuccess && <p role="status" className="text-sm">Inbox reconnected.</p>}
+          <div className="flex justify-end">
+            <Button variant="outline" disabled={!replacementKey || reconnect.isPending} onClick={() => reconnect.mutate()}>
+              {reconnect.isPending ? "Reconnecting…" : "Reconnect inbox"}
+            </Button>
+          </div>
+        </div>
+      </details>
+
+      <section aria-labelledby="email-disconnect-heading" className="space-y-3 border-t border-border pt-5">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="space-y-1">
+            <h2 id="email-disconnect-heading" className="text-sm font-semibold">Disconnect inbox</h2>
+            <p className="text-sm text-muted-foreground">Stop receiving email in Paperclip. The inbox stays in AgentMail.</p>
+          </div>
+          <Button variant="outline" size="sm" className="text-destructive" disabled={control.isPending}
+            onClick={() => control.mutate("remove")}>
+            Disconnect inbox
+          </Button>
+        </div>
+        {control.error && control.variables === "remove" && (
+          <p role="alert" className="text-sm text-destructive">{control.error.message}</p>
+        )}
+      </section>
     </div>
   );
 }

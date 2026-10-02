@@ -105,7 +105,10 @@ Each inbox has distinct **Settings**, **Access**, **Conversations**, and
 **Activity** views. Access reuses the saved account's credential and agent controls,
 so changes apply to every inbox using that account. Conversations links email
 threads to their tasks; Activity shows the shared delivery and publication feed.
-Inbox lifecycle controls use the email API, and reconnect opens inbox Settings.
+Settings leads with the agent’s copyable email address and how email becomes tasks.
+Receiving mode, last mail check, and Pause/Resume are grouped below. Reconnect
+credentials live in an expandable section, followed by a separate Disconnect
+action. Inbox lifecycle controls use the email API, and reconnect opens inbox Settings.
 Unconfirmed email delivery is resolved in its task rather than through chat replay.
 
 ## Receiving and task lifecycle

@@ -283,7 +283,7 @@ export function ChatEndpointDetail() {
       </div>
     );
   if (endpoint.provider === "agentmail" && activeTab === "settings")
-    return <EmailEndpointSettings key={endpoint.id} endpointId={endpoint.id} companyId={endpoint.companyId} />;
+    return <EmailEndpointSettings key={endpoint.id} endpointId={endpoint.id} companyId={endpoint.companyId} assignedAgentName={endpoint.assignedAgentName} />;
   const setupIncomplete =
     endpoint.setup?.step !== "complete" &&
     ["draft", "verifying", "attention", "revoked"].includes(endpoint.status);

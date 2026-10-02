@@ -1,0 +1,59 @@
+import type { Meta, StoryObj } from "@storybook/react-vite";
+import { expect, userEvent, within } from "storybook/test";
+import { EmailEndpointSettings } from "@/pages/apps/chat/EmailEndpointSetup";
+import type { EmailEndpointSummary } from "@paperclipai/shared";
+
+const COMPANY = "company-storybook";
+const ENDPOINT = "agentmail-settings-preview";
+const meta = {
+  title: "Connections/AgentMail settings",
+  component: EmailEndpointSettings,
+  parameters: { layout: "padded" },
+  args: { endpointId: ENDPOINT, companyId: COMPANY, assignedAgentName: "Ralph" },
+  beforeEach(context) {
+    let inbox: EmailEndpointSummary = {
+      id: ENDPOINT, companyId: COMPANY, connectionId: "preview-account", assignedAgentId: "ralph",
+      address: "ralph@paperclip.example", status: "active", receiveMode: "websocket",
+      lastSyncAt: "2026-10-02T12:40:00Z", lastError: null,
+      ...context.parameters.inbox,
+    };
+    const original = window.fetch;
+    window.fetch = async (input, init) => {
+      const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url, location.origin);
+      if (url.pathname === `/api/companies/${COMPANY}/email/inboxes`) return Response.json([inbox]);
+      if (url.pathname === `/api/email/inboxes/${ENDPOINT}/control`) {
+        const { action } = JSON.parse(String(init?.body));
+        inbox = { ...inbox, status: action === "pause" ? "paused" : action === "remove" ? "archived" : "active" };
+        return Response.json(inbox);
+      }
+      if (url.pathname === `/api/email/inboxes/${ENDPOINT}/reconnect`) {
+        const { receiveMode } = JSON.parse(String(init?.body));
+        inbox = { ...inbox, status: "active", receiveMode, lastError: null };
+        return Response.json(inbox);
+      }
+      return original(input, init);
+    };
+    return () => { window.fetch = original; };
+  },
+} satisfies Meta<typeof EmailEndpointSettings>;
+export default meta;
+type Story = StoryObj<typeof meta>;
+
+export const Receiving: Story = {};
+export const Paused: Story = { parameters: { inbox: { status: "paused" } } };
+export const NeedsAttention: Story = { parameters: { inbox: { status: "revoked", lastError: "AgentMail rejected the API key. Reconnect this inbox with a valid key." } } };
+export const Webhook: Story = { parameters: { inbox: { receiveMode: "webhook", lastSyncAt: null } } };
+export const LongAddress: Story = { parameters: { inbox: { address: "ralph-customer-support-and-operations@paperclip.example" } } };
+export const Mobile: Story = { globals: { viewport: { value: "mobile1", isRotated: false } }, parameters: { waitForViewport: true } };
+export const Reconnect: Story = { play: async ({ canvasElement }) => {
+  const canvas = within(canvasElement);
+  await canvas.findByRole("heading", { name: "ralph@paperclip.example" });
+  const disclosure = canvas.getByText("Reconnect inbox", { selector: "summary" });
+  await expect(canvas.queryByLabelText("New API key")).not.toBeVisible();
+  await userEvent.click(disclosure);
+  await expect(canvas.getByLabelText("New API key")).toBeVisible();
+  await expect(canvas.getByRole("link", { name: /Get an AgentMail API key/ })).toHaveAttribute("href", "https://console.agentmail.to/dashboard/api-keys");
+  await userEvent.type(canvas.getByLabelText("New API key"), "storybook-placeholder-key");
+  await userEvent.click(canvas.getByRole("button", { name: "Reconnect inbox" }));
+  await expect(await canvas.findByText("Inbox reconnected.")).toBeVisible();
+} };
