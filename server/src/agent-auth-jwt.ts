@@ -61,8 +61,11 @@ function jwtConfig() {
     // route-level 404s mask it as "Issue not found", and the agent reports the
     // API as down (AUT-2259, AUT-4454 run 1279713a). Operator TTLs may therefore
     // only extend coverage past the floor, never shorten it below a run's own
-    // lifetime. A token's blast radius stays bounded by the run lifecycle: the
-    // actor middleware revokes writes once the run reaches a terminal state.
+    // lifetime. The floor does widen the window in which a finished run's token
+    // is still accepted: `agentRunWritesRevoked` rejects writes only for
+    // cancelled (or cancellation-requested) runs, so a completed run keeps write
+    // access until the token expires. That window is bounded by this TTL and by
+    // the agent API key, which the operator can rotate to invalidate live tokens.
     ttlSeconds: Math.max(
       parseNumber(process.env.PAPERCLIP_AGENT_JWT_TTL_SECONDS, MIN_AGENT_JWT_TTL_SECONDS),
       MIN_AGENT_JWT_TTL_SECONDS,

@@ -568,4 +568,18 @@ describe("agent auth middleware", () => {
     expect(res.status).toBe(401);
     expect(res.body.error).toMatch(/agent credentials/i);
   });
+
+  it("still lets local_trusted run-scoped /api requests through without a token", async () => {
+    // A local run can carry X-Paperclip-Run-Id with no injected API key when
+    // JWT minting is unavailable; the instance's implicit board actor must keep
+    // serving those requests instead of hitting the 401 above.
+    const companyId = randomUUID();
+    const runId = randomUUID();
+    const { db } = createDbState({ agent: { id: randomUUID(), companyId } });
+    const res = await request(createApp(db, "local_trusted"))
+      .get(`/api/companies/${companyId}/issues/${randomUUID()}`)
+      .set("X-Paperclip-Run-Id", runId);
+    expect(res.status).not.toBe(401);
+    expect(res.body.error).not.toMatch(/agent credentials/i);
+  });
 });
