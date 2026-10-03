@@ -41,7 +41,16 @@ export async function withAgentStartLock<T>(agentId: string, fn: (lease: { renew
   const previous = startLocksByAgent.get(agentId);
   const waitForPrevious = previous ? waitForAgentStartLock(agentId, previous) : Promise.resolve();
   const holder: StartLock = { promise: Promise.resolve(), renewedAtMs: Date.now() };
-  const run = waitForPrevious.then(() => fn({ renew: () => void (holder.renewedAtMs = Date.now()) }));
+  const renew = () => void (holder.renewedAtMs = Date.now());
+  // A queued caller publishes its own entry, so a later caller reads this
+  // holder's lease and can start behind the incumbent if it looks stale. Renew
+  // while queued; the interval ends the moment this caller acquires.
+  const queued = setInterval(renew, Math.ceil(AGENT_START_LOCK_STALE_MS / 2));
+  queued.unref?.();
+  const run = waitForPrevious.then(() => {
+    clearInterval(queued);
+    return fn({ renew });
+  });
   holder.promise = run.then(
     () => undefined,
     () => undefined,
@@ -50,6 +59,7 @@ export async function withAgentStartLock<T>(agentId: string, fn: (lease: { renew
   try {
     return await run;
   } finally {
+    clearInterval(queued);
     if (startLocksByAgent.get(agentId) === holder) {
       startLocksByAgent.delete(agentId);
     }

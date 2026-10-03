@@ -17363,6 +17363,11 @@ export function heartbeatService(
   async function claimQueuedRun(
     run: typeof heartbeatRuns.$inferSelect,
     companyAgents?: AgentOrgRow[],
+    // One claim makes several DB round-trips, each of which can take
+    // seconds on a loaded host. Renew at every phase boundary so the
+    // agent-start lease tracks the claim's progress instead of expiring
+    // inside it (AUT-5348).
+    renew?: () => void,
   ) {
     if (run.status !== "queued") return run;
     const agent = await getAgent(run.agentId);
@@ -17383,6 +17388,7 @@ export function heartbeatService(
       );
       return null;
     }
+    renew?.();
 
     const context = parseObject(run.contextSnapshot);
     const budgetBlock = await budgets.getInvocationBlock(
@@ -17411,6 +17417,7 @@ export function heartbeatService(
       await cancelQueuedRunForHeartbeatDailyCap(run, dailyCapBlock);
       return null;
     }
+    renew?.();
 
     const issueId = readNonEmptyString(context.issueId);
     if (issueId && activeRunExecutions.size > 0) {
@@ -17430,6 +17437,7 @@ export function heartbeatService(
         .limit(1);
       if (settlingOwner) return null;
     }
+    renew?.();
     if (issueId) {
       const activePauseHold = await treeControlSvc.getActivePauseHoldGate(
         run.companyId,
@@ -17514,6 +17522,7 @@ export function heartbeatService(
         return null;
       }
     }
+    renew?.();
 
     const claimedAt = new Date();
     const responsibleUserId = await resolveResponsibleUserIdForRun({
@@ -17528,6 +17537,7 @@ export function heartbeatService(
         responsibleUserId: null,
       },
     });
+    renew?.();
     // All ordinary and comment claims use the same company-scoped issue
     // lock. A batch may claim several runs before executeRun tracks any owner.
     async function lockIssueExecutionClaim(tx: Db) {
@@ -17607,6 +17617,7 @@ export function heartbeatService(
       !nativeReviewContext && issueId && run.wakeupRequestId && queuedCommentIds.length > 0
         ? await db
             .transaction(async (tx) => {
+              renew?.();
               // Match the queue-edit lock order: issue, wake, then run. Once the
               // run becomes running, a concurrent discard must observe the
               // claimed wake and return an explicit conflict; if discard wins,
@@ -17929,6 +17940,7 @@ export function heartbeatService(
             });
           }
           return tx.transaction(async (claimTx) => {
+            renew?.();
             const issueClaim = await lockIssueExecutionClaim(claimTx as unknown as Db);
             if (issueClaim.blocked) return null;
             const claimedRun = await claimTx.update(heartbeatRuns).set(claimValues).where(and(
@@ -17960,6 +17972,7 @@ export function heartbeatService(
       },
     });
     publishRunLifecyclePluginEvent(claimed);
+    renew?.();
 
     if (!nativeReviewContext) {
       await setWakeupStatus(claimed.wakeupRequestId, "claimed", { claimedAt });
@@ -20181,12 +20194,12 @@ export function heartbeatService(
       for (const queuedRun of prioritizedRuns) {
         if (claimedRuns.length >= availableSlots) break;
         // claimQueuedRun is the longest phase (budget, tree-control,
-        // dependency and staleness checks), so renew per run rather than
-        // per loop.
+        // dependency and staleness checks), so it renews its own lease at
+        // each phase boundary and a queued run keeps waiting here.
         lease.renew();
         let claimed: typeof heartbeatRuns.$inferSelect | null;
         try {
-          claimed = await claimQueuedRun(queuedRun, companyAgents);
+          claimed = await claimQueuedRun(queuedRun, companyAgents, lease.renew);
         } catch (err) {
           if (isPermanentClaimRejection(err)) {
             rejectedClaims.push({ run: queuedRun, err });

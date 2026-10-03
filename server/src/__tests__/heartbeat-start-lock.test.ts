@@ -85,4 +85,56 @@ describe("heartbeat agent start lock", () => {
     expect(secondStart).toHaveBeenCalledTimes(1);
     expect(warn).not.toHaveBeenCalled();
   });
+
+  it("keeps a queued holder's own lease alive so a third start cannot jump it (AUT-5348)", async () => {
+    vi.useFakeTimers();
+    const warn = vi.spyOn(logger, "warn").mockImplementation(() => undefined);
+
+    const agentId = randomUUID();
+    let clockMs = 0;
+    // Each holder advances the shared fake clock in 5s phase boundaries, the
+    // way startNextQueuedRunForAgent does.
+    const holdFor = async (lease: { renew: () => void }, durationMs: number) => {
+      const startedAtMs = clockMs;
+      while (clockMs - startedAtMs < durationMs) {
+        lease.renew();
+        clockMs += 5_000;
+        await vi.advanceTimersByTimeAsync(5_000);
+      }
+    };
+    const firstStart = vi.fn(async (lease: { renew: () => void }) => {
+      await holdFor(lease, 60_000);
+      return "first";
+    });
+    const secondStart = vi.fn(async (lease: { renew: () => void }) => {
+      await holdFor(lease, 45_000);
+      return "second";
+    });
+    const thirdStart = vi.fn(async () => "third");
+
+    const firstResult = withAgentStartLock(agentId, firstStart);
+    await Promise.resolve();
+    const secondResult = withAgentStartLock(agentId, secondStart);
+    await Promise.resolve();
+    const thirdResult = withAgentStartLock(agentId, thirdStart);
+    await Promise.resolve();
+
+    // The first start runs 60s, twice the old 30s lease. The second caller is
+    // only queued the whole time, so its own lease must renew while it waits or
+    // the third caller reads it stale and starts behind the running start.
+    await expect(firstResult).resolves.toBe("first");
+    expect(secondStart).toHaveBeenCalledTimes(1);
+    expect(thirdStart).not.toHaveBeenCalled();
+    expect(warn).not.toHaveBeenCalled();
+
+    // The second start then holds 45s, also past the old lease, and the
+    // third caller stays queued behind it until it finishes.
+    await expect(secondResult).resolves.toBe("second");
+    expect(thirdStart).toHaveBeenCalledTimes(1);
+    expect(warn).not.toHaveBeenCalled();
+
+    await expect(thirdResult).resolves.toBe("third");
+    expect(thirdStart).toHaveBeenCalledTimes(1);
+    expect(warn).not.toHaveBeenCalled();
+  });
 });
