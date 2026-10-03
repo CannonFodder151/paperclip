@@ -20063,7 +20063,11 @@ export function heartbeatService(
     // agent's next queued run, which takes this same lock.
     const rejectedClaims: Array<{ run: typeof heartbeatRuns.$inferSelect; err: HttpError }> = [];
 
-    return withAgentStartLock(agentId, async () => {
+    // Every phase boundary renews the start-lock lease. Each phase below is a
+    // DB round-trip that can take seconds on a loaded box, so a legitimately
+    // slow start stays live instead of tripping the lease and letting a queued
+    // run start a duplicate (AUT-5348).
+    return withAgentStartLock(agentId, async (lease) => {
       const agent = await getAgent(agentId);
       if (!agent) return [];
       const invokability = await getAgentInvokability(agent);
@@ -20076,6 +20080,7 @@ export function heartbeatService(
         }
         return [];
       }
+      lease.renew();
       const policy = parseHeartbeatPolicy(agent);
       const runningCount = await countRunningRunsForAgent(agentId);
       const availableSlots = Math.max(
@@ -20096,6 +20101,7 @@ export function heartbeatService(
         )
         .orderBy(asc(heartbeatRuns.createdAt));
       if (queuedRuns.length === 0) return [];
+      lease.renew();
 
       const dependencyReadiness = await listQueuedRunDependencyReadiness(
         agent.companyId,
@@ -20127,6 +20133,7 @@ export function heartbeatService(
         );
       const issueById = new Map(issueRows.map((row) => [row.id, row]));
       const companyAgents = await listCompanyAgentOrgRows(agent.companyId);
+      lease.renew();
       const prioritizedRuns = [...queuedRuns].sort((left, right) => {
         const leftIssueId = readNonEmptyString(
           parseObject(left.contextSnapshot).issueId,
@@ -20173,6 +20180,10 @@ export function heartbeatService(
       const claimedRuns: Array<typeof heartbeatRuns.$inferSelect> = [];
       for (const queuedRun of prioritizedRuns) {
         if (claimedRuns.length >= availableSlots) break;
+        // claimQueuedRun is the longest phase (budget, tree-control,
+        // dependency and staleness checks), so renew per run rather than
+        // per loop.
+        lease.renew();
         let claimed: typeof heartbeatRuns.$inferSelect | null;
         try {
           claimed = await claimQueuedRun(queuedRun, companyAgents);
