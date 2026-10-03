@@ -49,6 +49,9 @@ export async function withAgentStartLock<T>(agentId: string, fn: (lease: { renew
   queued.unref?.();
   const run = waitForPrevious.then(() => {
     clearInterval(queued);
+    // The lease can be up to half a window old from the queued interval, and
+    // the first phase can take longer than what is left of the window.
+    renew();
     return fn({ renew });
   });
   holder.promise = run.then(
