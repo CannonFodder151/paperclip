@@ -22,8 +22,8 @@ import { runningProcesses } from "../adapters/index.ts";
 // when the fleet is already at the ceiling, and the run stays queued for a later
 // tick rather than being cancelled.
 
-const mockAdapterExecute = vi.hoisted(() =>
-  vi.fn(async () => ({
+const { adapterResult, mockAdapterExecute } = vi.hoisted(() => {
+  const adapterResult = {
     exitCode: 0,
     signal: null,
     timedOut: false,
@@ -31,8 +31,9 @@ const mockAdapterExecute = vi.hoisted(() =>
     summary: "Fleet cap test run.",
     provider: "test",
     model: "test-model",
-  })),
-);
+  };
+  return { adapterResult, mockAdapterExecute: vi.fn(async () => ({ ...adapterResult })) };
+});
 
 vi.mock("../adapters/index.ts", async () => {
   const actual = await vi.importActual<typeof import("../adapters/index.ts")>("../adapters/index.ts");
@@ -95,7 +96,10 @@ describeEmbeddedPostgres("fleet concurrency cap dispatch", () => {
 
   afterEach(async () => {
     await heartbeatService(db).drainActiveRunExecutions();
-    mockAdapterExecute.mockClear();
+    // mockReset, not mockClear: a test that holds the adapter to keep its runs in
+    // flight installs an implementation, and mockClear would leak it forward.
+    mockAdapterExecute.mockReset();
+    mockAdapterExecute.mockImplementation(async () => ({ ...adapterResult }));
     runningProcesses.clear();
     await db.execute(sql`truncate table ${companies} cascade`);
   });
@@ -173,6 +177,22 @@ describeEmbeddedPostgres("fleet concurrency cap dispatch", () => {
       wakeupRequestId,
     });
     return runId;
+  }
+
+  // Keep every dispatched run in flight until the returned release function
+  // runs. The default adapter resolves immediately, so its run frees the
+  // fleet slot before an assertion can observe it, which both hides the cap
+  // and triggers the freed-slot handoff that starts the next queued run.
+  function holdAdapter() {
+    let release: () => void = () => {};
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    mockAdapterExecute.mockImplementation(async () => {
+      await held;
+      return { ...adapterResult };
+    });
+    return release;
   }
 
   function heartbeat(cap?: string) {
@@ -277,13 +297,19 @@ describeEmbeddedPostgres("fleet concurrency cap dispatch", () => {
       await insertClaimableRun(companyId, agentId),
     ];
 
-    await heartbeat("2").resumeQueuedRuns();
+    const service = heartbeat("2");
+    const release = holdAdapter();
+    await service.resumeQueuedRuns();
 
     // Two of three start. The third stays queued for a later tick; nothing is
-    // cancelled and the fleet never runs more than the cap allows.
+    // cancelled and the fleet never runs more than the cap allows. The two
+    // started runs are still in flight here, so the count they hold is real.
     const statuses = await Promise.all(runIds.map(runStatus));
-    expect(statuses.filter((row) => row?.status === "succeeded")).toHaveLength(2);
+    expect(statuses.filter((row) => row?.status === "running")).toHaveLength(2);
     expect(statuses.filter((row) => row?.status === "queued")).toHaveLength(1);
+
+    release();
+    await service.drainActiveRunExecutions();
   }, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS);
 
   // The per-agent lock is keyed by agent, so two agents in one company can both
@@ -296,15 +322,21 @@ describeEmbeddedPostgres("fleet concurrency cap dispatch", () => {
     const secondRunId = await insertClaimableRun(companyId, secondAgentId);
 
     const service = heartbeat("1");
+    const release = holdAdapter();
     await Promise.all([
       service.startNextQueuedRunForAgent(firstAgentId),
       service.startNextQueuedRunForAgent(secondAgentId),
     ]);
-    await service.drainActiveRunExecutions();
 
+    // One slot, one run. Which agent wins the company lock is not deterministic,
+    // so assert the invariant rather than a specific winner: exactly one run is
+    // in flight and the other is still queued behind the cap.
     const statuses = [await runStatus(firstRunId), await runStatus(secondRunId)];
-    expect(statuses.filter((row) => row?.status === "succeeded")).toHaveLength(1);
+    expect(statuses.filter((row) => row?.status === "running")).toHaveLength(1);
     expect(statuses.filter((row) => row?.status === "queued")).toHaveLength(1);
+
+    release();
+    await service.drainActiveRunExecutions();
   }, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS);
 
   // A freed slot belongs to whoever in the company is queued, not only to the
