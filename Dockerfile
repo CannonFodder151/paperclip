@@ -179,6 +179,16 @@ RUN echo "cli-tools-epoch: ${CLI_TOOLS_CACHE_EPOCH}" \
   && mkdir -p /paperclip \
   && chown node:node /paperclip
 
+# The instance backup service shells out to pg_dump and psql
+# (packages/db/src/backup-lib.ts). The base image ships no PostgreSQL client,
+# so `backupEngine: "auto"` probes for the binary, finds none, and silently
+# falls back to the JavaScript dumper — 30+ minute backups on a large instance.
+# A separate RUN keeps the expensive CLI-tool layer above cached.
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends postgresql-client \
+  && rm -rf /var/lib/apt/lists/* \
+  && pg_dump --version
+
 COPY scripts/docker-entrypoint.sh /usr/local/bin/
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
