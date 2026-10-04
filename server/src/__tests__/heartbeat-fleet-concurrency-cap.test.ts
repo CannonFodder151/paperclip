@@ -104,7 +104,7 @@ describeEmbeddedPostgres("fleet concurrency cap dispatch", () => {
     await tempDb?.cleanup();
   });
 
-  async function insertAgent(name: string) {
+  async function insertAgent(name: string, maxConcurrentRuns = 1) {
     const companyId = randomUUID();
     const agentId = randomUUID();
     await db.insert(companies).values({
@@ -123,7 +123,7 @@ describeEmbeddedPostgres("fleet concurrency cap dispatch", () => {
       adapterType: "codex_local",
       adapterConfig: {},
       runtimeConfig: {
-        heartbeat: { enabled: true, intervalSec: 60, wakeOnDemand: true, maxConcurrentRuns: 1 },
+        heartbeat: { enabled: true, intervalSec: 60, wakeOnDemand: true, maxConcurrentRuns },
       },
       permissions: {},
     });
@@ -265,5 +265,64 @@ describeEmbeddedPostgres("fleet concurrency cap dispatch", () => {
 
     expect(mockAdapterExecute).toHaveBeenCalledOnce();
     expect(await runStatus(runId)).toMatchObject({ status: "succeeded" });
+  }, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS);
+
+  // The claim loop can take more than one run per dispatch. The cap has to
+  // bound that batch, not only the admission check that runs before it.
+  it("limits one batch to the slots the fleet has left", async () => {
+    const { companyId, agentId } = await insertAgent("batch-limit", 5);
+    const runIds = [
+      await insertClaimableRun(companyId, agentId),
+      await insertClaimableRun(companyId, agentId),
+      await insertClaimableRun(companyId, agentId),
+    ];
+
+    await heartbeat("2").resumeQueuedRuns();
+
+    // Two of three start. The third stays queued for a later tick; nothing is
+    // cancelled and the fleet never runs more than the cap allows.
+    const statuses = await Promise.all(runIds.map(runStatus));
+    expect(statuses.filter((row) => row?.status === "succeeded")).toHaveLength(2);
+    expect(statuses.filter((row) => row?.status === "queued")).toHaveLength(1);
+  }, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS);
+
+  // The per-agent lock is keyed by agent, so two agents in one company can both
+  // read the last slot. The company lock makes the count and the claim one
+  // operation for every agent in the company.
+  it("gives the last slot to one of two agents dispatching at once", async () => {
+    const { companyId, agentId: firstAgentId } = await insertAgent("race-first");
+    const secondAgentId = await insertAgentInCompany(companyId, "race-second");
+    const firstRunId = await insertClaimableRun(companyId, firstAgentId);
+    const secondRunId = await insertClaimableRun(companyId, secondAgentId);
+
+    const service = heartbeat("1");
+    await Promise.all([
+      service.startNextQueuedRunForAgent(firstAgentId),
+      service.startNextQueuedRunForAgent(secondAgentId),
+    ]);
+    await service.drainActiveRunExecutions();
+
+    const statuses = [await runStatus(firstRunId), await runStatus(secondRunId)];
+    expect(statuses.filter((row) => row?.status === "succeeded")).toHaveLength(1);
+    expect(statuses.filter((row) => row?.status === "queued")).toHaveLength(1);
+  }, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS);
+
+  // A freed slot belongs to whoever in the company is queued, not only to the
+  // agent whose run finished. resumeQueuedRuns only runs while scheduled
+  // heartbeats are on, so completion retries the company itself.
+  it("hands a freed slot to another agent that was waiting on the cap", async () => {
+    const { companyId, agentId: firstAgentId } = await insertAgent("slot-handoff-first");
+    const secondAgentId = await insertAgentInCompany(companyId, "slot-handoff-second");
+    const blockedRunId = await insertClaimableRun(companyId, secondAgentId);
+    const firstRunId = await insertClaimableRun(companyId, firstAgentId);
+
+    const service = heartbeat("1");
+    await service.startNextQueuedRunForAgent(firstAgentId);
+    await service.drainActiveRunExecutions();
+
+    // The first agent's run finished and released the company slot, so the run
+    // that was queued behind the cap starts without another wakeup.
+    expect(await runStatus(firstRunId)).toMatchObject({ status: "succeeded" });
+    expect(await runStatus(blockedRunId)).toMatchObject({ status: "succeeded" });
   }, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS);
 });

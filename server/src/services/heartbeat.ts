@@ -562,7 +562,7 @@ import {
 } from "./recovery/review-path-recovery.js";
 import { resolveRequiredSuccessfulRunHandoffOnValidPath } from "./successful-run-handoff-state.js";
 import { taskWatchdogService } from "./task-watchdogs.js";
-import { withAgentStartLock } from "./agent-start-lock.js";
+import { withAgentStartLock, withCompanyStartLock } from "./agent-start-lock.js";
 import {
   evaluateAgentInvokability,
   evaluateAgentInvokabilityFromDb,
@@ -19531,6 +19531,7 @@ export function heartbeatService(
         wasFirstHeartbeat: timerClaimWasFirstHeartbeat(run),
       });
       await startNextQueuedRunForAgent(run.agentId);
+      await retryQueuedRunsForCompany(run.companyId, run.agentId);
       runningProcesses.delete(run.id);
       reaped.push(run.id);
     }
@@ -20048,7 +20049,17 @@ export function heartbeatService(
     // agent's next queued run, which takes this same lock.
     const rejectedClaims: Array<{ run: typeof heartbeatRuns.$inferSelect; err: HttpError }> = [];
 
-    return withAgentStartLock(agentId, async () => {
+    const fleetCap = normalizeFleetMaxConcurrentRuns(
+      runtimeEnv.PAPERCLIP_MAX_CONCURRENT_RUNS,
+    );
+    // With the cap off this dispatches exactly as before and costs nothing extra.
+    // With it on we need the company id before taking the company-wide lock, and
+    // the agent read below is the only place it comes from.
+    const startOwner = fleetCap > 0 ? await getAgent(agentId) : null;
+    if (fleetCap > 0 && !startOwner) return [];
+
+    const dispatch = () =>
+    withAgentStartLock(agentId, async () => {
       const agent = await getAgent(agentId);
       if (!agent) return [];
       const invokability = await getAgentInvokability(agent);
@@ -20062,28 +20073,28 @@ export function heartbeatService(
         return [];
       }
       const policy = parseHeartbeatPolicy(agent);
-      // Fleet-wide ceiling from PAPERCLIP_MAX_CONCURRENT_RUNS. 0 = disabled, so
-      // dispatch is unchanged unless an operator opts in. Per-agent slots below
-      // still apply; this only refuses to start a run when the fleet is already at
-      // its ceiling. The queued run stays queued and a later tick retries.
-      const fleetCap = normalizeFleetMaxConcurrentRuns(
-        runtimeEnv.PAPERCLIP_MAX_CONCURRENT_RUNS,
-      );
-      if (fleetCap > 0) {
-        const fleetRunning = await countRunningRunsForCompany(agent.companyId);
-        if (fleetRunning >= fleetCap) {
-          logger.info(
-            { agentId, companyId: agent.companyId, fleetRunning, fleetCap },
-            "fleet concurrency cap reached; leaving run queued",
-          );
-          return [];
-        }
-      }
       const runningCount = await countRunningRunsForAgent(agentId);
-      const availableSlots = Math.max(
+      const agentSlots = Math.max(
         0,
         policy.maxConcurrentRuns - runningCount,
       );
+      // The fleet cap has to bound the whole batch, not just admission. This
+      // dispatch may claim several queued runs, and the claim loop below starts
+      // at most availableSlots of them, so the company count feeds the slot
+      // budget itself. Otherwise one dispatch would overshoot the cap and
+      // recreate the contention the cap exists to prevent.
+      let availableSlots = agentSlots;
+      if (fleetCap > 0) {
+        const fleetRunning = await countRunningRunsForCompany(agent.companyId);
+        const fleetSlots = Math.max(0, fleetCap - fleetRunning);
+        availableSlots = Math.min(agentSlots, fleetSlots);
+        if (fleetSlots <= 0) {
+          logger.info(
+            { agentId, companyId: agent.companyId, fleetRunning, fleetCap },
+            "fleet concurrency cap reached; leaving runs queued",
+          );
+        }
+      }
       if (availableSlots <= 0) return [];
 
       const queuedRuns = await db
@@ -20213,7 +20224,38 @@ export function heartbeatService(
         });
       }
       return claimedRuns;
-    }).finally(() => cancelRejectedQueuedRuns(rejectedClaims));
+    });
+
+    // The count and the claim must be one protected operation, otherwise two
+    // agents in this company can both read the last slot and both start.
+    const dispatchUnderLocks = startOwner
+      ? () => withCompanyStartLock(startOwner.companyId, dispatch)
+      : dispatch;
+    return dispatchUnderLocks().finally(() => cancelRejectedQueuedRuns(rejectedClaims));
+  }
+
+  // A freed fleet slot belongs to whoever in the company is queued, not just to
+  // the agent whose run finished. The periodic resumeQueuedRuns sweep only runs
+  // while scheduled heartbeats are enabled, so completion retries the company
+  // itself; otherwise a manual run for another agent waits for a wakeup that may
+  // never come.
+  async function retryQueuedRunsForCompany(companyId: string, excludeAgentId: string) {
+    if (normalizeFleetMaxConcurrentRuns(runtimeEnv.PAPERCLIP_MAX_CONCURRENT_RUNS) <= 0) {
+      return;
+    }
+    const queued = await db
+      .selectDistinct({ agentId: heartbeatRuns.agentId })
+      .from(heartbeatRuns)
+      .where(
+        and(
+          eq(heartbeatRuns.companyId, companyId),
+          eq(heartbeatRuns.status, "queued"),
+          ne(heartbeatRuns.agentId, excludeAgentId),
+        ),
+      );
+    for (const row of queued) {
+      await startNextQueuedRunForAgent(row.agentId);
+    }
   }
 
   // Await every background heartbeat execution that is currently in flight. A
@@ -26792,6 +26834,7 @@ export function heartbeatService(
             });
         }
         await startNextQueuedRunForAgent(run.agentId);
+        await retryQueuedRunsForCompany(run.companyId, run.agentId);
       }
     }
   }
@@ -29765,6 +29808,7 @@ export function heartbeatService(
           wasFirstHeartbeat: timerClaimWasFirstHeartbeat(run),
         });
         await startNextQueuedRunForAgent(run.agentId);
+        await retryQueuedRunsForCompany(run.companyId, run.agentId);
       }
       return cancelled;
     } finally {
@@ -30272,6 +30316,7 @@ export function heartbeatService(
     retryScheduledRetryNow,
 
     resumeQueuedRuns,
+    startNextQueuedRunForAgent,
 
     scheduleBoundedRetry: async (
       runId: string,
