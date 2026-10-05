@@ -32,6 +32,7 @@ import {
   inArray,
   isNull,
   notInArray,
+  sql,
 } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import type { ChatChannelService } from "../services/chat-channels.js";
