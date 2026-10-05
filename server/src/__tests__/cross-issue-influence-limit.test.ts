@@ -1,16 +1,20 @@
 import { describe, expect, it } from "vitest";
+import { sql } from "drizzle-orm";
+import { PgDialect } from "drizzle-orm/pg-core";
+import { heartbeatRuns } from "@paperclipai/db";
 import {
   CROSS_ISSUE_INFLUENCE_ENFORCE_AT,
   CROSS_ISSUE_INFLUENCE_LIMIT,
   crossIssueInfluenceLimitError,
   evaluateCrossIssueInfluenceLimit,
   observeCrossIssueInfluence,
+  stampRunContextIssueId,
 } from "../services/cross-issue-influence-limit.ts";
 
 function counterDb(
   initialCount = 0,
   runOverrides: Record<string, unknown> | null = {},
-  claimedIssueIds: string[] = [],
+  checkedOutIssueId: string | null = null,
 ) {
   let observedCount = initialCount;
   const inserted: Array<Record<string, unknown>> = [];
@@ -30,18 +34,16 @@ function counterDb(
           if (Object.keys(selection).includes("count")) {
             return resolved([{ count: observedCount }]);
           }
-          // The run lock (`.for`) and the checked-out-issue claim lookup
-          // (`.then`) both start here; only the run select carries the
-          // agent and snapshot columns.
-          if (Object.keys(selection).includes("contextSnapshot")) {
-            const runLock = {
-              then: (resolve: (rows: unknown[]) => unknown) =>
-                resolve(runOverrides === null ? [] : [runRow]),
-              for: () => runLock,
-            };
-            return runLock;
-          }
-          return resolved(claimedIssueIds.map((id) => ({ id })));
+          // One chainable covers both remaining shapes: the run lock (`.for`)
+          // and the checked-out-issue anchor lookup (`.orderBy().limit()`).
+          const chainable = {
+            then: (resolve: (rows: unknown[]) => unknown) =>
+              resolve(runOverrides === null ? [] : [runRow]),
+            for: () => chainable,
+            orderBy: () => chainable,
+            limit: () => resolved(checkedOutIssueId ? [{ id: checkedOutIssueId }] : []),
+          };
+          return chainable;
         },
       }),
     }),
@@ -61,6 +63,32 @@ function counterDb(
       return observedCount;
     },
   };
+}
+
+/**
+ * Minimal stand-in for the `UPDATE heartbeat_runs ... RETURNING id` the stamp
+ * issues. It captures the statement instead of running it so the test can
+ * render the SQL and assert on it.
+ */
+function stampDb(rowsAffected = 1) {
+  const captured: { table?: unknown; set: Record<string, unknown>; where?: unknown } = {
+    set: {},
+  };
+  const db = {
+    update: (table: unknown) => ({
+      set: (set: Record<string, unknown>) => ({
+        where: (where: unknown) => ({
+          returning: async () => {
+            captured.table = table;
+            captured.set = set;
+            captured.where = where;
+            return Array.from({ length: rowsAffected }, () => ({ id: "run-1" }));
+          },
+        }),
+      }),
+    }),
+  };
+  return { db, captured };
 }
 
 describe("cross-issue influence limit rollout", () => {
@@ -206,7 +234,7 @@ describe("cross-issue influence limit rollout", () => {
     expect(fake.inserted).toEqual([]);
   });
 
-  it("fails closed when the run holds no live issue claim", async () => {
+  it("fails closed when the persisted run has no source issue", async () => {
     const fake = counterDb(0, { contextSnapshot: {} });
 
     await expect(observeCrossIssueInfluence(fake.db as never, {
@@ -222,9 +250,9 @@ describe("cross-issue influence limit rollout", () => {
     expect(fake.inserted).toEqual([]);
   });
 
-  it("does not charge a heartbeat run for writing to the only issue it has checked out", async () => {
+  it("does not charge a heartbeat run for writing to the issue it has checked out", async () => {
     const checkedOut = "55555555-5555-4555-8555-555555555555";
-    const fake = counterDb(0, { contextSnapshot: {} }, [checkedOut]);
+    const fake = counterDb(0, { contextSnapshot: {} }, checkedOut);
 
     await expect(observeCrossIssueInfluence(fake.db as never, {
       companyId: "22222222-2222-4222-8222-222222222222",
@@ -237,7 +265,7 @@ describe("cross-issue influence limit rollout", () => {
   });
 
   it("still charges a heartbeat run for writing to an issue it has not checked out", async () => {
-    const fake = counterDb(0, { contextSnapshot: {} }, ["55555555-5555-4555-8555-555555555555"]);
+    const fake = counterDb(0, { contextSnapshot: {} }, "55555555-5555-4555-8555-555555555555");
 
     await expect(observeCrossIssueInfluence(fake.db as never, {
       companyId: "22222222-2222-4222-8222-222222222222",
@@ -248,17 +276,85 @@ describe("cross-issue influence limit rollout", () => {
     })).resolves.toMatchObject({ count: 1, allowed: true });
   });
 
-  it("charges writes once a run juggles two live checkouts instead of buying them free", async () => {
-    const checkedOut = "55555555-5555-4555-8555-555555555555";
-    const fake = counterDb(0, { contextSnapshot: {} }, [checkedOut, "66666666-6666-4666-8666-666666666666"]);
+  // The stamp is the durable half of the fix: the claim it was paired with is
+  // cleared once the run reaches a terminal status, so the snapshot is what the
+  // gate still reads when the work is reviewed. The rendered SQL is asserted
+  // rather than a recorded result — these cases are the gate's own SQL, and a
+  // fake db would only re-implement it.
+  it("stamps the checked-out issue as the run anchor and marks it as checkout-made", async () => {
+    const issueId = "55555555-5555-4555-8555-555555555555";
+    const { db, captured } = stampDb(1);
+
+    await expect(stampRunContextIssueId(db as never, {
+      companyId: "22222222-2222-4222-8222-222222222222",
+      runId: "11111111-1111-4111-8111-111111111111",
+      agentId: "33333333-3333-4333-8333-333333333333",
+      issueId,
+    })).resolves.toBe(true);
+
+    expect(captured.table).toBe(heartbeatRuns);
+    const set = new PgDialect().sqlToQuery(captured.set.contextSnapshot as never);
+    // Both keys are written: `issueId` is the anchor the gate reads,
+    // `checkoutAnchoredIssueId` is what marks the anchor as this run's own.
+    expect(set.sql).toContain("||");
+    expect(JSON.parse(String(set.params[0]))).toEqual({
+      issueId,
+      checkoutAnchoredIssueId: issueId,
+    });
+    // The merge keeps other wake keys (`source`, trigger detail) in the snapshot.
+    expect(set.sql).toContain("coalesce");
+  });
+
+  it("moves a checkout-made anchor but leaves a wake anchor alone", async () => {
+    const { db, captured } = stampDb(1);
+    await stampRunContextIssueId(db as never, {
+      companyId: "22222222-2222-4222-8222-222222222222",
+      runId: "11111111-1111-4111-8111-111111111111",
+      agentId: "33333333-3333-4333-8333-333333333333",
+      issueId: "55555555-5555-4555-8555-555555555555",
+    });
+
+    const where = new PgDialect().sqlToQuery(captured.where as never);
+    // First stamp: no anchor at all. Later stamp: the anchor exists but this run
+    // made it. Release clears the issue's run claim and not the snapshot, so a
+    // second checkout has to be able to move the anchor — otherwise the run
+    // keeps free writes on an issue it no longer holds and is charged for the
+    // one it now owns.
+    expect(where.sql).toContain("is null");
+    expect(where.sql).toContain("checkoutAnchoredIssueId");
+    expect(where.sql).toContain("or");
+    // A run anchored by its wake matches neither branch and is left alone: the
+    // wake is the stronger statement, and re-anchoring it would hand the run
+    // free writes on an issue it never woke for. The stamp is scoped to the one
+    // run, and to the company and agent it was made under.
+    expect(where.sql).not.toMatch(/^\s*true/i);
+  });
+
+  it("reports a run it was not allowed to stamp", async () => {
+    const { db } = stampDb(0);
+    await expect(stampRunContextIssueId(db as never, {
+      companyId: "22222222-2222-4222-8222-222222222222",
+      runId: "11111111-1111-4111-8111-111111111111",
+      agentId: "33333333-3333-4333-8333-333333333333",
+      issueId: "55555555-5555-4555-8555-555555555555",
+    })).resolves.toBe(false);
+  });
+
+  it("charges nothing for writing to the issue the checkout stamped", async () => {
+    // The checkout-to-write path end to end through the gate: the snapshot a
+    // stamp leaves behind is what the next write is measured against.
+    const stamped = "55555555-5555-4555-8555-555555555555";
+    const fake = counterDb(0, {
+      contextSnapshot: { issueId: stamped, checkoutAnchoredIssueId: stamped },
+    });
 
     await expect(observeCrossIssueInfluence(fake.db as never, {
       companyId: "22222222-2222-4222-8222-222222222222",
       runId: "11111111-1111-4111-8111-111111111111",
       agentId: "33333333-3333-4333-8333-333333333333",
-      targetIssueId: checkedOut,
+      targetIssueId: stamped,
       kind: "comment",
-    })).resolves.toMatchObject({ count: 1, allowed: true });
-    expect(fake.inserted[0]).toMatchObject({ details: { sourceIssueId: null } });
+    })).resolves.toBeNull();
+    expect(fake.inserted).toEqual([]);
   });
 });

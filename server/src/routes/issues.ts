@@ -32,7 +32,6 @@ import {
   inArray,
   isNull,
   notInArray,
-  sql,
 } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import type { ChatChannelService } from "../services/chat-channels.js";
@@ -341,6 +340,7 @@ import {
   crossIssueInfluenceLimitError,
   crossIssueInfluenceRunContextError,
   observeCrossIssueInfluence,
+  stampRunContextIssueId,
   type CrossIssueInfluenceKind,
 } from "../services/cross-issue-influence-limit.js";
 import {
@@ -15035,48 +15035,6 @@ export function issueRoutes(
     res.json(issue);
   });
 
-  /**
-   * Records the issue a run checked out into that run's context snapshot.
-   *
-   * The snapshot is the anchor the cross-issue influence gate reads. A run that
-   * already carries an `issueId` from its wake keeps it: the wake is the
-   * stronger statement of what the run was woken to do, and overwriting it
-   * would silently re-anchor a task-scoped run onto a different issue.
-   */
-  async function stampRunContextIssueId(
-    runDb: typeof db,
-    input: {
-      companyId: string;
-      runId: string;
-      agentId: string;
-      issueId: string;
-    },
-  ) {
-    const updated = await runDb
-      .update(heartbeatRuns)
-      .set({
-        contextSnapshot: sql`coalesce(${heartbeatRuns.contextSnapshot}, '{}'::jsonb) || ${JSON.stringify(
-          { issueId: input.issueId },
-        )}::jsonb`,
-      })
-      .where(
-        and(
-          eq(heartbeatRuns.id, input.runId),
-          eq(heartbeatRuns.companyId, input.companyId),
-          eq(heartbeatRuns.agentId, input.agentId),
-          sql`coalesce(${heartbeatRuns.contextSnapshot}->>'issueId', ${heartbeatRuns.contextSnapshot}->>'taskId') is null`,
-        ),
-      )
-      .returning({ id: heartbeatRuns.id })
-      .then((rows) => rows.length > 0);
-    if (!updated) {
-      logger.debug(
-        { runId: input.runId, issueId: input.issueId },
-        "run already anchored; left context snapshot unchanged",
-      );
-    }
-  }
-
   router.post(
     "/issues/:id/checkout",
     validate(checkoutIssueSchema),
@@ -15205,9 +15163,11 @@ export function issueRoutes(
       // every write it makes. Checkout is where the run commits to an issue, so
       // record that commitment in the run context as well as the issue row:
       // writes to this issue become same-issue and uncharged, writes elsewhere
-      // are metered against the same per-run cap. The claim itself is cleared
-      // once the run reaches a terminal status, so the snapshot is the only
-      // record of what the run was working on when the work is reviewed later.
+      // are metered against the same per-run cap. The stamp follows the run's
+      // checkouts, so an anchor is never left pointing at an issue the run no
+      // longer holds, and the claim itself is cleared once the run reaches a
+      // terminal status — leaving the snapshot the only record of what the run
+      // was working on when the work is reviewed later.
       if (checkoutRunId && req.actor.type === "agent") {
         await stampRunContextIssueId(db, {
           companyId: issue.companyId,
