@@ -2063,6 +2063,12 @@ export const TERMINAL_HEARTBEAT_RUN_STATUSES = new Set([
   "cancelled",
   "timed_out",
 ]);
+// How long a queued, never-started run may still back an execution lock.
+// An armed retry that the scheduler has not re-armed this long past its due
+// time is dead; an unarmed run may be legitimately queued for a fleet
+// concurrency slot, so it only counts as leaked once it has been waiting a day.
+const EXECUTION_LOCK_RETRY_OVERDUE_MS = 15 * 60 * 1000;
+const EXECUTION_LOCK_UNARMED_QUEUE_MS = 24 * 60 * 60 * 1000;
 const ISSUE_LIST_DESCRIPTION_MAX_CHARS = 1200;
 const ISSUE_LIST_DESCRIPTION_MAX_BYTES = ISSUE_LIST_DESCRIPTION_MAX_CHARS * 4;
 
@@ -2528,6 +2534,76 @@ export async function heartbeatRunIsTerminalOrMissing(
     .then((rows: Array<{ status: string }>) => rows[0] ?? null);
   if (!run) return true;
   return TERMINAL_HEARTBEAT_RUN_STATUSES.has(run.status);
+}
+
+/**
+ * A queued run that never started and can no longer be dispatched holds
+ * `issues.execution_run_id` forever: nothing promotes it out of `queued`, and
+ * every lock-clearing site treats a non-terminal run as a live claim, so the
+ * assignee can neither check the issue out nor PATCH it. Such a run is a stale
+ * execution lock and no longer backs any claim.
+ *
+ * Deliberately narrower than "terminal". A queued run with no retry armed is
+ * usually just waiting for a slot under the fleet concurrency cap, so that
+ * case is age-gated at 24h; an armed-but-overdue retry gets 15 minutes of
+ * margin for queue latency.
+ *
+ * A `created_at` stamped in the future never ages the row: both branches clamp
+ * it to `now`, so a clock anomaly reads as "queued just now" instead of
+ * producing a negative age that no threshold can match. The armed-retry branch
+ * does not read `created_at` at all, so an overdue retry still expires the lock.
+ */
+export function executionLockIsStale(
+  run: {
+    status: string;
+    startedAt: Date | null;
+    scheduledRetryAt: Date | null;
+    createdAt: Date;
+  },
+  now: Date = new Date(),
+): boolean {
+  if (run.status !== "queued" || run.startedAt != null) return false;
+  const before = (ms: number) => new Date(now.getTime() - ms);
+  const queuedFor = run.createdAt < now ? run.createdAt : now;
+  return (
+    (run.scheduledRetryAt != null &&
+      run.scheduledRetryAt < before(EXECUTION_LOCK_RETRY_OVERDUE_MS)) ||
+    (run.scheduledRetryAt == null &&
+      queuedFor < before(EXECUTION_LOCK_UNARMED_QUEUE_MS))
+  );
+}
+
+/**
+ * Whether a lock pointing at `runId` may be cleared: the run is terminal or
+ * missing, or it is a dispatch-dead queued run (see `executionLockIsStale`).
+ * Kept separate from `heartbeatRunIsTerminalOrMissing` because the workspace
+ * gates that helper also backs must keep waiting on a still-retrying run.
+ */
+export async function heartbeatRunIsStaleExecutionLock(
+  dbOrTx: Pick<Db, "select">,
+  runId: string,
+  now?: Date,
+): Promise<boolean> {
+  if (await heartbeatRunIsTerminalOrMissing(dbOrTx, runId)) return true;
+  const run = await dbOrTx
+    .select({
+      status: heartbeatRuns.status,
+      startedAt: heartbeatRuns.startedAt,
+      scheduledRetryAt: heartbeatRuns.scheduledRetryAt,
+      createdAt: heartbeatRuns.createdAt,
+    })
+    .from(heartbeatRuns)
+    .where(eq(heartbeatRuns.id, runId))
+    .then(
+      (rows: Array<{
+        status: string;
+        startedAt: Date | null;
+        scheduledRetryAt: Date | null;
+        createdAt: Date;
+      }>) => rows[0] ?? null,
+    );
+  if (!run) return true;
+  return executionLockIsStale(run, now);
 }
 
 /**
@@ -7480,11 +7556,17 @@ export function issueService(db: Db) {
     );
   }
 
-  async function isTerminalOrMissingHeartbeatRun(
+    async function isTerminalOrMissingHeartbeatRun(
     runId: string,
     dbOrTx: DbReader = db,
   ) {
     return heartbeatRunIsTerminalOrMissing(dbOrTx, runId);
+  }
+
+  // Lock-only variant of the above: a lock may also be dropped when the run it
+  // points at is queued, never started, and past its dispatch window.
+  async function isStaleExecutionLock(runId: string, dbOrTx: DbReader = db) {
+    return heartbeatRunIsStaleExecutionLock(dbOrTx, runId);
   }
 
   async function adoptStaleCheckoutRun(input: {
@@ -7641,6 +7723,10 @@ export function issueService(db: Db) {
     });
   }
 
+  // Clears the bundled execution lock columns when the row's executionRunId
+  // points at a run that can no longer act on it: terminal, missing, or a
+  // queued run that never started and can no longer be dispatched. A run that
+  // is still queued with a live dispatch window keeps the lock.
   async function clearExecutionRunIfTerminal(
     issueId: string,
   ): Promise<boolean> {
@@ -7659,11 +7745,21 @@ export function issueService(db: Db) {
         sql`select ${heartbeatRuns.id} from ${heartbeatRuns} where ${heartbeatRuns.id} = ${issue.executionRunId} for update`,
       );
       const run = await tx
-        .select({ status: heartbeatRuns.status })
+        .select({
+          status: heartbeatRuns.status,
+          startedAt: heartbeatRuns.startedAt,
+          scheduledRetryAt: heartbeatRuns.scheduledRetryAt,
+          createdAt: heartbeatRuns.createdAt,
+        })
         .from(heartbeatRuns)
         .where(eq(heartbeatRuns.id, issue.executionRunId))
         .then((rows) => rows[0] ?? null);
-      if (run && !TERMINAL_HEARTBEAT_RUN_STATUSES.has(run.status)) return false;
+      if (
+        run &&
+        !TERMINAL_HEARTBEAT_RUN_STATUSES.has(run.status) &&
+        !executionLockIsStale(run)
+      )
+        return false;
 
       const updated = await tx
         .update(issues)
@@ -7688,9 +7784,10 @@ export function issueService(db: Db) {
 
   // Symmetric to clearExecutionRunIfTerminal. Clears checkoutRunId (and the
   // bundled execution lock cols) when the row's checkoutRunId points at a
-  // heartbeat run that is terminal or no longer exists. No assignee/status
-  // precondition: a terminal run holds no real claim regardless of who is
-  // assigned or what status the issue is currently in.
+  // heartbeat run that can no longer act on it: terminal, missing, or a queued
+  // run that never started and can no longer be dispatched. No assignee/status
+  // precondition: such a run holds no real claim regardless of who is assigned
+  // or what status the issue is currently in.
   async function clearCheckoutRunIfTerminal(issueId: string): Promise<boolean> {
     return db.transaction(async (tx) => {
       await tx.execute(
@@ -7710,11 +7807,21 @@ export function issueService(db: Db) {
         sql`select ${heartbeatRuns.id} from ${heartbeatRuns} where ${heartbeatRuns.id} = ${issue.checkoutRunId} for update`,
       );
       const run = await tx
-        .select({ status: heartbeatRuns.status })
+        .select({
+          status: heartbeatRuns.status,
+          startedAt: heartbeatRuns.startedAt,
+          scheduledRetryAt: heartbeatRuns.scheduledRetryAt,
+          createdAt: heartbeatRuns.createdAt,
+        })
         .from(heartbeatRuns)
         .where(eq(heartbeatRuns.id, issue.checkoutRunId))
         .then((rows) => rows[0] ?? null);
-      if (run && !TERMINAL_HEARTBEAT_RUN_STATUSES.has(run.status)) return false;
+      if (
+        run &&
+        !TERMINAL_HEARTBEAT_RUN_STATUSES.has(run.status) &&
+        !executionLockIsStale(run)
+      )
+        return false;
 
       if (
         issue.executionRunId &&
@@ -7724,13 +7831,19 @@ export function issueService(db: Db) {
           sql`select ${heartbeatRuns.id} from ${heartbeatRuns} where ${heartbeatRuns.id} = ${issue.executionRunId} for update`,
         );
         const executionRun = await tx
-          .select({ status: heartbeatRuns.status })
+          .select({
+            status: heartbeatRuns.status,
+            startedAt: heartbeatRuns.startedAt,
+            scheduledRetryAt: heartbeatRuns.scheduledRetryAt,
+            createdAt: heartbeatRuns.createdAt,
+          })
           .from(heartbeatRuns)
           .where(eq(heartbeatRuns.id, issue.executionRunId))
           .then((rows) => rows[0] ?? null);
         if (
           executionRun &&
-          !TERMINAL_HEARTBEAT_RUN_STATUSES.has(executionRun.status)
+          !TERMINAL_HEARTBEAT_RUN_STATUSES.has(executionRun.status) &&
+          !executionLockIsStale(executionRun)
         )
           return false;
       }
@@ -11591,16 +11704,22 @@ export function issueService(db: Db) {
         }
       }
 
-      // Adopt stale executionRunId — if the execution lock points to a terminal/missing run, clear it and proceed.
-      // Only adopts when the caller's expectedStatuses guard still holds; preserves any existing assigneeUserId
-      // and preserves the original startedAt when the issue is already in_progress.
+      // Adopt stale executionRunId — if the execution lock points to a
+      // terminal/missing run or a dispatch-dead queued one, clear it and
+      // proceed. Only adopts when no live checkout holds the row (a run
+      // that is mid-dispatch is never yanked out from under it), when the
+      // caller's expectedStatuses guard still holds, preserves any
+      // existing assigneeUserId and preserves the original startedAt when
+      // the issue is already in_progress.
       if (
         checkoutRunId &&
         current.executionRunId &&
         current.executionRunId !== checkoutRunId &&
+        (current.checkoutRunId == null ||
+          current.checkoutRunId === current.executionRunId) &&
         (current.assigneeAgentId === agentId || current.assigneeAgentId == null)
       ) {
-        const stale = await isTerminalOrMissingHeartbeatRun(
+        const stale = await isStaleExecutionLock(
           current.executionRunId,
         );
         if (stale) {
@@ -11848,7 +11967,7 @@ export function issueService(db: Db) {
           existing.checkoutRunId &&
           !sameRunLock(existing.checkoutRunId, actorRunId ?? null)
         ) {
-          const stale = await isTerminalOrMissingHeartbeatRun(
+          const stale = await isStaleExecutionLock(
             existing.checkoutRunId,
             tx,
           );

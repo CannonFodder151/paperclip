@@ -38,7 +38,7 @@ describeEmbeddedPostgres("stale issue execution lock routes", () => {
   beforeAll(async () => {
     tempDb = await startEmbeddedPostgresTestDatabase("paperclip-stale-execution-lock-routes-");
     db = createDb(tempDb.connectionString);
-  }, 20_000);
+  }, 180_000);
 
   afterEach(async () => {
     await db.delete(issueComments);
@@ -566,5 +566,239 @@ describeEmbeddedPostgres("stale issue execution lock routes", () => {
       checkoutRunId: currentRunId,
       executionRunId: currentRunId,
     });
+  });
+
+  // AUT-5692: a run stuck at queued/never-started holds issues.execution_run_id
+  // forever. These cases pin the staleness window so a legitimately queued run is
+  // never reaped and a dispatch-dead one always is.
+  async function seedIssueHeldByQueuedRun(
+    runOverrides: Partial<typeof heartbeatRuns.$inferInsert> = {},
+  ) {
+    const { companyId, agentId, currentRunId } = await seedCompanyAgentAndRuns();
+    const stuckRunId = randomUUID();
+    const issueId = randomUUID();
+    await db.insert(heartbeatRuns).values({
+      id: stuckRunId,
+      companyId,
+      agentId,
+      status: "queued",
+      invocationSource: "automation",
+      startedAt: null,
+      ...runOverrides,
+    });
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Held by a queued run",
+      status: "in_progress",
+      priority: "high",
+      assigneeAgentId: agentId,
+      checkoutRunId: null,
+      executionRunId: stuckRunId,
+      executionAgentNameKey: "codexcoder",
+      executionLockedAt: new Date(),
+    });
+    await db
+      .update(heartbeatRuns)
+      .set({ contextSnapshot: { issueId } })
+      .where(eq(heartbeatRuns.id, currentRunId));
+    return { companyId, agentId, currentRunId, stuckRunId, issueId };
+  }
+
+  const MINUTE = 60_000;
+  const HOUR = 60 * MINUTE;
+
+  it.each([
+    {
+      title: "keeps a freshly queued unarmed run's lock",
+      runOverrides: { createdAt: new Date(Date.now() - HOUR), scheduledRetryAt: null },
+    },
+    {
+      title: "keeps a queued run's lock while its armed retry is still inside the grace window",
+      runOverrides: {
+        createdAt: new Date(Date.now() - 2 * HOUR),
+        scheduledRetryAt: new Date(Date.now() - 5 * MINUTE),
+      },
+    },
+    {
+      title: "keeps a queued run's lock whose started_at is set (dispatching now)",
+      runOverrides: {
+        createdAt: new Date(Date.now() - 3 * HOUR),
+        startedAt: new Date(),
+        scheduledRetryAt: null,
+      },
+    },
+    {
+      // AUT-5707: a future-dated created_at must not be read as a negative age.
+      // Unarmed and clamped to now, the run is "queued just now" — not leaked,
+      // but not permanently unreapable either.
+      title: "keeps a future-dated unarmed queued run's lock",
+      runOverrides: {
+        createdAt: new Date(Date.now() + 5 * HOUR),
+        scheduledRetryAt: null,
+      },
+    },
+  ])("$title and answers checkout with 409", async ({ runOverrides }) => {
+    const { companyId, agentId, currentRunId, stuckRunId, issueId } =
+      await seedIssueHeldByQueuedRun(runOverrides);
+
+    const res = await request(createApp(agentActor(companyId, agentId, currentRunId)))
+      .post(`/api/issues/${issueId}/checkout`)
+      .send({
+        agentId,
+        expectedStatuses: ["todo", "backlog", "blocked", "in_review", "in_progress"],
+      });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(409);
+    expect(res.body).toMatchObject({ error: "Issue checkout conflict" });
+
+    const row = await db
+      .select({
+        status: issues.status,
+        checkoutRunId: issues.checkoutRunId,
+        executionRunId: issues.executionRunId,
+      })
+      .from(issues)
+      .where(eq(issues.id, issueId))
+      .then((rows) => rows[0]);
+    expect(row).toEqual({
+      status: "in_progress",
+      checkoutRunId: null,
+      executionRunId: stuckRunId,
+    });
+  });
+
+  it.each([
+    {
+      title: "adopts an armed queued run whose retry has been overdue for over 15 minutes",
+      runOverrides: {
+        createdAt: new Date(Date.now() - 3 * HOUR),
+        scheduledRetryAt: new Date(Date.now() - 20 * MINUTE),
+      },
+    },
+    {
+      title: "adopts an unarmed queued run that has waited over 24 hours",
+      runOverrides: {
+        createdAt: new Date(Date.now() - 25 * HOUR),
+        scheduledRetryAt: null,
+      },
+    },
+    {
+      // AUT-5707: an armed retry that is overdue expires the lock even
+      // when created_at is stamped in the future — the retry branch
+      // never reads created_at, so a clock anomaly cannot make the row
+      // permanently unreapable.
+      title: "adopts a future-dated queued run whose armed retry is overdue",
+      runOverrides: {
+        createdAt: new Date(Date.now() + 5 * HOUR),
+        scheduledRetryAt: new Date(Date.now() - 20 * MINUTE),
+      },
+    },
+  ])("$title", async ({ runOverrides }) => {
+    const { companyId, agentId, currentRunId, issueId } =
+      await seedIssueHeldByQueuedRun(runOverrides);
+
+    const res = await request(createApp(agentActor(companyId, agentId, currentRunId)))
+      .post(`/api/issues/${issueId}/checkout`)
+      .send({
+        agentId,
+        expectedStatuses: ["todo", "backlog", "blocked", "in_review", "in_progress"],
+      });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+
+    const row = await db
+      .select({
+        status: issues.status,
+        assigneeAgentId: issues.assigneeAgentId,
+        checkoutRunId: issues.checkoutRunId,
+        executionRunId: issues.executionRunId,
+      })
+      .from(issues)
+      .where(eq(issues.id, issueId))
+      .then((rows) => rows[0]);
+    expect(row).toEqual({
+      status: "in_progress",
+      assigneeAgentId: agentId,
+      checkoutRunId: currentRunId,
+      executionRunId: currentRunId,
+    });
+  });
+
+  it("unblocks the assignee's PATCH and release behind a dispatch-dead queued run", async () => {
+    const { companyId, agentId, currentRunId, issueId } = await seedIssueHeldByQueuedRun({
+      createdAt: new Date(Date.now() - 30 * HOUR),
+      scheduledRetryAt: null,
+    });
+
+    const patchRes = await request(createApp(agentActor(companyId, agentId, currentRunId)))
+      .patch(`/api/issues/${issueId}`)
+      .send({ title: "Recovered from a queued lock" });
+    expect(patchRes.status, JSON.stringify(patchRes.body)).toBe(200);
+
+    const releaseRes = await request(createApp(agentActor(companyId, agentId, currentRunId)))
+      .post(`/api/issues/${issueId}/release`)
+      .send();
+    expect(releaseRes.status, JSON.stringify(releaseRes.body)).toBe(200);
+
+    const row = await db
+      .select({
+        status: issues.status,
+        checkoutRunId: issues.checkoutRunId,
+        executionRunId: issues.executionRunId,
+        executionAgentNameKey: issues.executionAgentNameKey,
+        executionLockedAt: issues.executionLockedAt,
+      })
+      .from(issues)
+      .where(eq(issues.id, issueId))
+      .then((rows) => rows[0]);
+    expect(row).toEqual({
+      status: "todo",
+      checkoutRunId: null,
+      executionRunId: null,
+      executionAgentNameKey: null,
+      executionLockedAt: null,
+    });
+  });
+
+  it("keeps a live checkout in place even when its execution lock run is dispatch-dead", async () => {
+    // A mid-dispatch run holds checkoutRunId; a stale executionRunId alongside it
+    // must not let a contender yank the row out from under it.
+    const { companyId, agentId, currentRunId, stuckRunId } =
+      await seedIssueHeldByQueuedRun({ createdAt: new Date(Date.now() - 30 * HOUR) });
+    const contenderRunId = randomUUID();
+    await db.insert(heartbeatRuns).values({
+      id: contenderRunId,
+      companyId,
+      agentId,
+      status: "running",
+      invocationSource: "manual",
+      startedAt: new Date(),
+    });
+    await db
+      .update(issues)
+      .set({ checkoutRunId: currentRunId })
+      .where(eq(issues.executionRunId, stuckRunId));
+    const [issue] = await db.select({ id: issues.id }).from(issues).where(eq(issues.executionRunId, stuckRunId));
+
+    const res = await request(createApp(agentActor(companyId, agentId, contenderRunId)))
+      .post(`/api/issues/${issue.id}/checkout`)
+      .send({
+        agentId,
+        expectedStatuses: ["todo", "backlog", "blocked", "in_review", "in_progress"],
+      });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(409);
+    // The mid-dispatch checkout keeps the row; only the dispatch-dead
+    // execution lock alongside it is cleared.
+    const row = await db
+      .select({
+        checkoutRunId: issues.checkoutRunId,
+        executionRunId: issues.executionRunId,
+      })
+      .from(issues)
+      .where(eq(issues.id, issue.id))
+      .then((rows) => rows[0]);
+    expect(row).toEqual({ checkoutRunId: currentRunId, executionRunId: null });
   });
 });

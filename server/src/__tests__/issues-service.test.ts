@@ -39,6 +39,7 @@ import { instanceSettingsService } from "../services/instance-settings.ts";
 import {
   clampIssueListLimit,
   deriveIssueCommentRunLogAttribution,
+  executionLockIsStale,
   ISSUE_LIST_MAX_LIMIT,
   issueService,
   readIssueCommentRunLogText,
@@ -69,6 +70,68 @@ describe("issue list limit helpers", () => {
     expect(clampIssueListLimit(0)).toBe(1);
     expect(clampIssueListLimit(25.9)).toBe(25);
     expect(clampIssueListLimit(ISSUE_LIST_MAX_LIMIT + 10)).toBe(ISSUE_LIST_MAX_LIMIT);
+  });
+});
+
+describe("executionLockIsStale (AUT-5692 / AUT-5707)", () => {
+  const HOUR = 60 * 60 * 1000;
+  const MINUTE = 60 * 1000;
+  const now = new Date("2026-10-05T12:00:00.000Z");
+
+  it("never classifies a running, started, or non-queued run as stale", () => {
+    const base = { createdAt: new Date(now.getTime() - 30 * HOUR) };
+    expect(executionLockIsStale({ ...base, status: "queued", startedAt: new Date(now), scheduledRetryAt: null }, now)).toBe(false);
+    expect(executionLockIsStale({ ...base, status: "running", startedAt: null, scheduledRetryAt: null }, now)).toBe(false);
+    expect(executionLockIsStale({ ...base, status: "failed", startedAt: null, scheduledRetryAt: null }, now)).toBe(false);
+  });
+
+  it("expires an armed retry that the scheduler has not re-armed for over 15 minutes", () => {
+    expect(
+      executionLockIsStale(
+        { status: "queued", startedAt: null, scheduledRetryAt: new Date(now.getTime() - 16 * MINUTE), createdAt: new Date(now.getTime() - HOUR) },
+        now,
+      ),
+    ).toBe(true);
+    expect(
+      executionLockIsStale(
+        { status: "queued", startedAt: null, scheduledRetryAt: new Date(now.getTime() - 14 * MINUTE), createdAt: new Date(now.getTime() - HOUR) },
+        now,
+      ),
+    ).toBe(false);
+  });
+
+  it("age-gates an unarmed queued run at 24 hours of queueing", () => {
+    const row = (ageMs: number) => ({
+      status: "queued",
+      startedAt: null,
+      scheduledRetryAt: null,
+      createdAt: new Date(now.getTime() - ageMs),
+    });
+    expect(executionLockIsStale(row(25 * HOUR), now)).toBe(true);
+    expect(executionLockIsStale(row(23 * HOUR), now)).toBe(false);
+  });
+
+  // AUT-5707: a future-dated created_at must not read as a negative age
+  // that no threshold can match — that would make the row permanently
+  // unreapable. Clamp to now: unarmed rows are "queued just now", and the
+  // armed-retry branch does not read created_at at all.
+  it("clamps a future-dated created_at instead of reading it as a negative age", () => {
+    const future = new Date(now.getTime() + 5 * HOUR);
+    expect(
+      executionLockIsStale({ status: "queued", startedAt: null, scheduledRetryAt: null, createdAt: future }, now),
+    ).toBe(false);
+    // ...but the overdue armed retry still expires the lock.
+    expect(
+      executionLockIsStale(
+        {
+          status: "queued",
+          startedAt: null,
+          scheduledRetryAt: new Date(now.getTime() - 20 * MINUTE),
+          createdAt: future,
+        },
+        now,
+      ),
+    ).toBe(true);
   });
 });
 
